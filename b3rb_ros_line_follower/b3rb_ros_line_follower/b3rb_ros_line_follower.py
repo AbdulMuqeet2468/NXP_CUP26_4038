@@ -145,7 +145,23 @@ class LineFollower(Node):
         # width = message.image_width
         # half_width = width / 2.0
         # For now, we do not modify self.target_turn so the buggy continues straight.
-        pass
+        #pass
+        #==========changes made==========
+        self.get_logger().info(f"Vector Count: {message.vector_count}")
+
+        if message.vector_count == 2:
+            self.get_logger().info(
+                f"Left : {message.vector_1[0].x:.1f}, {message.vector_1[0].y:.1f} -> "
+                f"{message.vector_1[1].x:.1f}, {message.vector_1[1].y:.1f}"
+            )
+
+            self.get_logger().info(
+                f"Right: {message.vector_2[0].x:.1f}, {message.vector_2[0].y:.1f} -> "
+                f"{message.vector_2[1].x:.1f}, {message.vector_2[1].y:.1f}"
+            )
+        #==========
+
+
 
     def lidar_callback(self, message):
         """
