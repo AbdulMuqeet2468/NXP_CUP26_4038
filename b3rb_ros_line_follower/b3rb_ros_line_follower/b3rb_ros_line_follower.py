@@ -111,6 +111,9 @@ class LineFollower(Node):
         self.current_destination = None
         self.mission_completed = False
 
+        #added
+        self.prev_error = 0.0
+
         # Timer to publish drive commands at 10Hz
         self.control_timer = self.create_timer(0.1, self.publish_drive_commands)
 
@@ -147,6 +150,7 @@ class LineFollower(Node):
         # For now, we do not modify self.target_turn so the buggy continues straight.
         #pass
         #==========changes made==========
+        '''
         self.get_logger().info(f"Vector Count: {message.vector_count}")
 
         if message.vector_count == 2:
@@ -159,7 +163,54 @@ class LineFollower(Node):
                 f"Right: {message.vector_2[0].x:.1f}, {message.vector_2[0].y:.1f} -> "
                 f"{message.vector_2[1].x:.1f}, {message.vector_2[1].y:.1f}"
             )
+        '''
         #==========
+        width = message.image_width
+        image_center = width / 2.0
+
+        self.target_speed = 0.85
+
+        # No lane detected
+        if message.vector_count == 0:
+            self.target_turn = 0.0
+            return
+
+        # ------------------ Two lanes ------------------
+        if message.vector_count == 2:
+
+            left_x = message.vector_1[1].x
+            right_x = message.vector_2[1].x
+
+            lane_center = (left_x + right_x) / 2.0
+            error = lane_center - image_center
+
+            derivative = error - self.prev_error
+
+            Kp = 0.06
+            Kd = 0.04
+            self.target_turn = max(min(Kp * error + Kd * derivative, 1.0), -1.0)
+
+            return
+
+        # ------------------ One lane ------------------
+        x = message.vector_1[1].x
+
+        # Line on left side of image
+        if x < image_center:
+            desired_x = width * 0.25
+
+        # Line on right side
+        else:
+            desired_x = width * 0.75
+
+        error = x - desired_x
+
+        derivative = error - self.prev_error
+        self.prev_error = error
+
+        Kp = 0.06
+        Kd = 0.04
+        self.target_turn = max(min(Kp * error + Kd * derivative, 1.0), -1.0)
 
 
 
