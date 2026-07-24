@@ -30,7 +30,7 @@ GREEN_COLOR = (0, 255, 0)
 
 # HINT: You can adjust what percentage of the image from the bottom is analyzed.
 # Lower portions are closer to the buggy, while upper portions see further ahead.
-VECTOR_IMAGE_HEIGHT_PERCENTAGE = 0.225
+VECTOR_IMAGE_HEIGHT_PERCENTAGE = 0.35
 VECTOR_MAGNITUDE_MINIMUM = 2.25
 
 class EdgeVectorsPublisher(Node):
@@ -163,8 +163,15 @@ class EdgeVectorsPublisher(Node):
         thresh = cv2.threshold(gray, threshold_black, 255, cv2.THRESH_BINARY_INV)[1]
 
         # 3. Crop the image to focus on the lower section close to the buggy
-        thresh_cropped = thresh[self.image_height - self.lower_image_height:]
-        image_cropped = image[self.image_height - self.lower_image_height:].copy()
+        #thresh_cropped = thresh[self.image_height - self.lower_image_height:]
+        #image_cropped = image[self.image_height - self.lower_image_height:].copy()
+        ROI_OFFSET = 0      # pixels (experiment with 20, 40, 60...)
+
+        start = self.image_height - self.lower_image_height - ROI_OFFSET
+        end = self.image_height - ROI_OFFSET
+
+        thresh_cropped = thresh[start:end]
+        image_cropped = image[start:end].copy()
 
         # 4. Compute vectors from the binary image contours
         vectors, debug_img = self.compute_vectors_from_image(image_cropped, thresh_cropped)
@@ -186,8 +193,10 @@ class EdgeVectorsPublisher(Node):
                 cv2.line(debug_img, tuple(best_vector[0]), tuple(best_vector[1]), GREEN_COLOR, 2)
                 
                 # Transform coordinates back to the original uncropped image space
-                best_vector[0][1] += self.upper_image_height
-                best_vector[1][1] += self.upper_image_height
+                #best_vector[0][1] += self.upper_image_height
+                #best_vector[1][1] += self.upper_image_height
+                best_vector[0][1] += start
+                best_vector[1][1] += start
                 final_vectors.append(best_vector[:2])
 
         # Publish visual debugging images (viewable in tools like Foxglove)
