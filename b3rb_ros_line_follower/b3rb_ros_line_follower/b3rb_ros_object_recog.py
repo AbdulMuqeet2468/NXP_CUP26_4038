@@ -77,7 +77,10 @@ class ObjectRecognizer(Node):
         if sign_detected is None:
             self.last_label = None
             self.stable_count = 0
+            self.published_label = None #added to reset label even if next sign is the same as previous sign
             return
+        #problem here is that whenever sign board is out of camera fov and again the same board comes in fov, it is detecting again, and mightrepeat the same command
+        
 
         if sign_detected == self.last_label:
             self.stable_count += 1
