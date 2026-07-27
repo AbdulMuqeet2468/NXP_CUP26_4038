@@ -7,6 +7,7 @@ package_name = 'b3rb_ros_line_follower'
 standard_data_files = [
     ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
     ('share/' + package_name, ['package.xml']),
+    ('share/' + package_name, ['best.pt']),
 ]
 
 setup(
@@ -14,7 +15,7 @@ setup(
     version='0.0.0',
     packages=find_packages(exclude=['test']),
     package_data={
-        package_name: ['*.h5'],
+        package_name: ['*.pt'],
     },
     data_files=standard_data_files,
     install_requires=['setuptools'],
