@@ -168,7 +168,7 @@ class LineFollower(Node):
         width = message.image_width
         image_center = width / 2.0
 
-        self.target_speed = 0.85
+        self.target_speed = 0.2
 
         # No lane detected
         if message.vector_count == 0:
@@ -186,8 +186,8 @@ class LineFollower(Node):
 
             derivative = error - self.prev_error
 
-            Kp = 0.06
-            Kd = 0.04
+            Kp = 0.045
+            Kd = 0.02
             self.target_turn = max(min(Kp * error + Kd * derivative, 1.0), -1.0)
 
             return
@@ -208,8 +208,8 @@ class LineFollower(Node):
         derivative = error - self.prev_error
         self.prev_error = error
 
-        Kp = 0.06
-        Kd = 0.04
+        Kp = 0.045
+        Kd = 0.02
         self.target_turn = max(min(Kp * error + Kd * derivative, 1.0), -1.0)
 
 
