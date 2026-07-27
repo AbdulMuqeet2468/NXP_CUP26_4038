@@ -30,6 +30,7 @@ setup(
             'vectors = b3rb_ros_line_follower.b3rb_ros_edge_vectors:main',
             'runner = b3rb_ros_line_follower.b3rb_ros_line_follower:main',
             'detect = b3rb_ros_line_follower.b3rb_ros_object_recog:main',
+            'detect_debug = b3rb_ros_line_follower.b3rb_ros_object_recog_debug:main',
             'qr_detect = b3rb_ros_line_follower.b3rb_ros_qr_detector:main',
         ],
     },
