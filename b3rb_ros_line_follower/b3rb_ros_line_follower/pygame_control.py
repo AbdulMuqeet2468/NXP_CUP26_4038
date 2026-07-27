@@ -5,8 +5,8 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Joy
 
-FORWARD_SPEED = 0.7
-REVERSE_SPEED = -0.7
+FORWARD_SPEED = 2.0
+REVERSE_SPEED = -2.0
 LEFT_TURN = 0.6
 RIGHT_TURN = -0.6
 
