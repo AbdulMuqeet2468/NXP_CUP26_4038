@@ -31,6 +31,7 @@ setup(
             'runner = b3rb_ros_line_follower.b3rb_ros_line_follower:main',
             'detect = b3rb_ros_line_follower.b3rb_ros_object_recog:main',
             'detect_debug = b3rb_ros_line_follower.b3rb_ros_object_recog_debug:main',
+            'target_pub = b3rb_ros_line_follower.target_test:main',
             'qr_detect = b3rb_ros_line_follower.b3rb_ros_qr_detector:main',
         ],
     },
