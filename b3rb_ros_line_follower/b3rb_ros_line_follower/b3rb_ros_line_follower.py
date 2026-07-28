@@ -113,6 +113,12 @@ class LineFollower(Node):
 
         #added
         self.prev_error = 0.0
+        #tune values for PID controller
+        self.kp = 0.045
+        self.kd = 0.02
+        self.ki = 0.0
+
+        self.integral = 0.0
 
         # Timer to publish drive commands at 10Hz
         self.control_timer = self.create_timer(0.1, self.publish_drive_commands)
@@ -135,45 +141,23 @@ class LineFollower(Node):
 
     def edge_vectors_callback(self, message):
         """
-        Receives lane boundaries from the camera vector extractor.
-        
-        GUIDELINE (Lane Following):
-        - `message.vector_count` contains the number of active bounds seen (0, 1, or 2).
-        - `message.vector_1` and `message.vector_2` contain the points defining the bounds.
-        - You need to write logic to compute the centerline deviation and adjust `self.target_turn`.
-        - E.g., if only one line is seen, steer away from it to keep distance; if two lines are seen,
-          calculate the midpoint relative to the image width and steer to center the buggy.
+        Receives lane boundaries from the camera vector extractor
         """
-        # HINTS:
-        # width = message.image_width
-        # half_width = width / 2.0
-        # For now, we do not modify self.target_turn so the buggy continues straight.
-        #pass
-        #==========changes made==========
-        '''
-        self.get_logger().info(f"Vector Count: {message.vector_count}")
-
-        if message.vector_count == 2:
-            self.get_logger().info(
-                f"Left : {message.vector_1[0].x:.1f}, {message.vector_1[0].y:.1f} -> "
-                f"{message.vector_1[1].x:.1f}, {message.vector_1[1].y:.1f}"
-            )
-
-            self.get_logger().info(
-                f"Right: {message.vector_2[0].x:.1f}, {message.vector_2[0].y:.1f} -> "
-                f"{message.vector_2[1].x:.1f}, {message.vector_2[1].y:.1f}"
-            )
-        '''
-        #==========
+        
+      
+      
         width = message.image_width
         image_center = width / 2.0
 
-        self.target_speed = 0.2
+        self.target_speed = 1.0
 
         # No lane detected
         if message.vector_count == 0:
             self.target_turn = 0.0
             return
+
+        
+
 
         # ------------------ Two lanes ------------------
         if message.vector_count == 2:
@@ -182,14 +166,16 @@ class LineFollower(Node):
             right_x = message.vector_2[1].x
 
             lane_center = (left_x + right_x) / 2.0
+
+            # PID control for lane following    
             error = lane_center - image_center
-
+            self.integral += error
             derivative = error - self.prev_error
+            self.prev_error = error
 
-            Kp = 0.045
-            Kd = 0.02
-            self.target_turn = max(min(Kp * error + Kd * derivative, 1.0), -1.0)
+            self.integral = max(min(self.integral, 1000), -1000)
 
+            self.target_turn = max(min(self.kp * error + self.ki * self.integral + self.kd * derivative, 1.0), -1.0)
             return
 
         # ------------------ One lane ------------------
@@ -204,13 +190,14 @@ class LineFollower(Node):
             desired_x = width * 0.75
 
         error = x - desired_x
+        self.integral += error
 
         derivative = error - self.prev_error
         self.prev_error = error
 
-        Kp = 0.045
-        Kd = 0.02
-        self.target_turn = max(min(Kp * error + Kd * derivative, 1.0), -1.0)
+        self.integral = max(min(self.integral, 1000), -1000)
+
+        self.target_turn = max(min(self.kp * error + self.ki * self.integral + self.kd * derivative, 1.0), -1.0)
 
 
 
