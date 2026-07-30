@@ -114,9 +114,13 @@ class LineFollower(Node):
         #added
         self.prev_error = 0.0
         #tune values for PID controller
-        self.kp = 0.045
-        self.kd = 0.02
-        self.ki = 0.0
+        #self.kp = 0.0076
+        #self.kd = 0.004
+        #self.ki = 0.0000125
+
+        self.kp = 0.00775
+        self.kd = 0.00425
+        self.ki = 0.000014
 
         self.integral = 0.0
 
@@ -149,7 +153,7 @@ class LineFollower(Node):
         width = message.image_width
         image_center = width / 2.0
 
-        self.target_speed = 1.0
+        
 
         # No lane detected
         if message.vector_count == 0:
@@ -161,6 +165,11 @@ class LineFollower(Node):
 
         # ------------------ Two lanes ------------------
         if message.vector_count == 2:
+
+            self.target_speed = 1.0
+            self.kp = 0.00775
+            self.kd = 0.00425
+            self.ki = 0.000014
 
             left_x = message.vector_1[1].x
             right_x = message.vector_2[1].x
@@ -177,17 +186,22 @@ class LineFollower(Node):
 
             self.target_turn = max(min(self.kp * error + self.ki * self.integral + self.kd * derivative, 1.0), -1.0)
             return
-
+       
         # ------------------ One lane ------------------
+        self.target_speed = 0.685
+        self.kp = 0.00775
+        self.kd = 0.00425
+        self.ki = 0.000014
+
         x = message.vector_1[1].x
 
         # Line on left side of image
         if x < image_center:
-            desired_x = width * 0.25
+            desired_x = width * 0.15
 
         # Line on right side
         else:
-            desired_x = width * 0.75
+            desired_x = width * 0.85
 
         error = x - desired_x
         self.integral += error
@@ -198,7 +212,29 @@ class LineFollower(Node):
         self.integral = max(min(self.integral, 1000), -1000)
 
         self.target_turn = max(min(self.kp * error + self.ki * self.integral + self.kd * derivative, 1.0), -1.0)
+        '''
+        # ------------------ One lane ------------------
+        x = message.vector_1[1].x
 
+        # Steer towards the visible lane
+        error = x - image_center
+
+        self.integral += error
+        self.integral = max(min(self.integral, 1000), -1000)
+
+        derivative = error - self.prev_error
+        self.prev_error = error
+
+        self.target_turn = max(
+            min(
+                self.kp * error +
+                self.ki * self.integral +
+                self.kd * derivative,
+                1.0
+            ),
+            -1.0
+        )
+        '''
 
 
     def lidar_callback(self, message):
