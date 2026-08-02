@@ -1,17 +1,3 @@
-# Copyright 2024-2026 NXP
-# Copyright 2016 Open Source Robotics Foundation, Inc.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 import rclpy
 from rclpy.node import Node
@@ -30,12 +16,6 @@ SPEED_MAX = 1.0
 TURN_MIN = -1.0
 TURN_MAX = 1.0
 
-# CONFIGURATION:
-# The buggy is driven in manual mode by publishing standard controller Joy messages to /cerebri/in/joy.
-# The layout is: msg.axes = [0.0, speed, 0.0, turn]
-# - speed: positive for forward, negative for reverse. Range: [-1.0, 1.0]
-# - turn: positive for left steer, negative for right steer. Range: [-1.0, 1.0]
-# msg.buttons = [1, 0, 0, 0, 0, 0, 0, 1] (Keep buttons set to this pattern for manual override mode)
 
 class LineFollower(Node):
     """
@@ -212,29 +192,8 @@ class LineFollower(Node):
         self.integral = max(min(self.integral, 1000), -1000)
 
         self.target_turn = max(min(self.kp * error + self.ki * self.integral + self.kd * derivative, 1.0), -1.0)
-        '''
-        # ------------------ One lane ------------------
-        x = message.vector_1[1].x
-
-        # Steer towards the visible lane
-        error = x - image_center
-
-        self.integral += error
-        self.integral = max(min(self.integral, 1000), -1000)
-
-        derivative = error - self.prev_error
-        self.prev_error = error
-
-        self.target_turn = max(
-            min(
-                self.kp * error +
-                self.ki * self.integral +
-                self.kd * derivative,
-                1.0
-            ),
-            -1.0
-        )
-        '''
+        
+        
 
 
     def lidar_callback(self, message):

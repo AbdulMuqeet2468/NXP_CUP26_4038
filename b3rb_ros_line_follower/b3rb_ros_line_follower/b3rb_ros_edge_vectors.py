@@ -159,7 +159,7 @@ class EdgeVectorsPublisher(Node):
 
         # 2. Binary Thresholding (aiming to isolate the black stripes of the track)
         # Note: In the simulation, black stripes will result in low intensity values (close to 0).
-        threshold_black = 25
+        threshold_black = 10
         thresh = cv2.threshold(gray, threshold_black, 255, cv2.THRESH_BINARY_INV)[1]
 
         # 3. Crop the image to focus on the lower section close to the buggy
