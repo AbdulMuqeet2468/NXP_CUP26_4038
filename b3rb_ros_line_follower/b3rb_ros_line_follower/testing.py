@@ -1,0 +1,401 @@
+import rclpy
+from rclpy.node import Node
+import time
+import math
+from sensor_msgs.msg import Joy, LaserScan
+from std_msgs.msg import String
+from synapse_msgs.msg import EdgeVectors, ServerCommunication
+import numpy as np
+
+QOS_PROFILE_DEFAULT = 10
+PI = math.pi
+
+# Control bounds
+SPEED_MIN = 0.0
+SPEED_MAX = 1.0
+TURN_MIN = -1.0
+TURN_MAX = 1.0
+
+
+class LineFollower(Node):
+    """
+    Core controller Node for the B3RB buggy.
+    By default, it publishes a safe drive-straight command on a timer loop.
+    Implement logic inside the callbacks to steer, dodge obstacles, detect destinations,
+    communicate with the server, and park.
+    """
+    def __init__(self):
+        super().__init__('line_follower')
+
+        # ------------------ Subscriptions ------------------
+        
+        # 1. Lane Edge Vectors (from edge_vectors_publisher)
+        self.subscription_vectors = self.create_subscription(
+            EdgeVectors,
+            '/edge_vectors',
+            self.edge_vectors_callback,
+            QOS_PROFILE_DEFAULT)
+
+        # 2. LIDAR Obstacle Scanner
+        self.subscription_lidar = self.create_subscription(
+            LaserScan,
+            '/scan',
+            self.lidar_callback,
+            QOS_PROFILE_DEFAULT)
+
+        # 3. Server Communication Feedback Loop
+        self.subscription_server = self.create_subscription(
+            ServerCommunication,
+            '/ServerCommunication',
+            self.server_communication_callback,
+            QOS_PROFILE_DEFAULT)
+
+        # 4. QR Code Detections (from qr_detector)
+        self.subscription_qr = self.create_subscription(
+            String,
+            '/qr_detection',
+            self.qr_detection_callback,
+            QOS_PROFILE_DEFAULT)
+
+        # 5. Sign Board Detections (from object_recognizer)
+        self.subscription_signs = self.create_subscription(
+            String,
+            '/sign_board_detection',
+            self.sign_board_callback,
+            QOS_PROFILE_DEFAULT)
+
+        # ------------------ Publishers ------------------
+        
+        # Publisher to drive/steer the buggy
+        self.publisher_joy = self.create_publisher(
+            Joy,
+            '/cerebri/in/joy',
+            QOS_PROFILE_DEFAULT)
+
+        # Publisher to send messages to the Server
+        self.publisher_server = self.create_publisher(
+            ServerCommunication,
+            '/ServerCommunication',
+            QOS_PROFILE_DEFAULT)
+
+        # ------------------ State Variables & Timer ------------------
+        
+        # Default controls: drive straight slowly
+        self.target_speed = 0.0
+        self.target_turn = 0.0
+
+        # State variables (You can add your own state flags / state machines here)
+        self.obstacle_in_front = False
+        self.patient_id = None
+        self.hospital_id = None
+        self.current_destination = None
+        self.mission_completed = False
+
+        #added
+        
+        # earlier good values
+        #self.kp = 0.0076
+        #self.kd = 0.004
+        #self.ki = 0.0000125
+
+        # Tuned PID values for 'good' performance
+        # currently used for both single and double lane detection
+        self.kp = 0.00775
+        self.kd = 0.00425
+        self.ki = 0.000014
+
+        self.prev_error = 0.0
+        self.integral = 0.0
+
+        # LIDAR flags
+        self.obj_on_right = False
+        self.obj_on_left = False
+        self.obj_still_on_right = False
+        self.obj_still_on_left = False
+
+        # LIDAR distance thresholds 
+        self.min_threshold = 0.5
+        self.detection_threshold = 1.5
+
+        # Lane
+        self.lane_mode = "STICK_LEFT"  # Options: "CENTER", "STICK_LEFT", "STICK_RIGHT"
+
+        # Timer to publish drive commands at 10Hz
+        self.control_timer = self.create_timer(0.1, self.publish_drive_commands)
+
+        # Timer to debug status
+        self.create_timer(1.0, self.debug_status)
+
+        self.get_logger().info("Line Follower controller initialized. Safe Drive-Straight Mode active.")
+
+    def publish_drive_commands(self):
+        """Timer callback that periodically publishes the current speed and steer command."""
+        msg = Joy()
+        msg.buttons = [1, 0, 0, 0, 0, 0, 0, 1]  # Manual override button configuration
+        msg.axes = [0.0, self.target_speed, 0.0, self.target_turn]
+        self.publisher_joy.publish(msg)
+
+    def rover_move_manual_mode(self, speed, turn):
+        """Helper to immediately set control speed and steering angle."""
+        self.target_speed = float(max(min(speed, SPEED_MAX), -SPEED_MAX))
+        self.target_turn = float(max(min(turn, TURN_MAX), -TURN_MAX))
+
+    # ------------------ Callback Implementations ------------------
+
+    def edge_vectors_callback(self, message):
+        """
+        Receives lane boundaries from the camera vector extractor
+        """
+        width = message.image_width
+        image_center = width / 2.0
+
+        
+
+        # No lane detected
+        if message.vector_count == 0:
+            self.target_turn = 0.0
+            return
+
+        
+
+        
+        if self.lane_mode == "CENTER":
+            # ------------------ Two lanes ------------------
+            if message.vector_count == 2:
+
+                self.target_speed = 1.0
+
+                left_x = message.vector_1[1].x
+                right_x = message.vector_2[1].x
+
+                lane_width = right_x - left_x
+                margin = 0.65 * lane_width
+
+                lane_center = (left_x + right_x) / 2.0
+
+                # PID control for two lane control
+                #self.kp = 0.00775
+                #self.kd = 0.00425
+                #self.ki = 0.000014
+
+                # PID control for lane following    
+                error = lane_center - image_center
+                self.integral += error
+                derivative = error - self.prev_error
+                self.prev_error = error
+
+                self.integral = max(min(self.integral, 1000), -1000)
+
+                self.target_turn = max(min(self.kp * error + self.ki * self.integral + self.kd * derivative, 1.0), -1.0)
+                return
+       
+            # ------------------ One lane ------------------
+            self.target_speed = 0.685
+
+            #trying values for single lane control
+            #self.kp = 0.00775
+            #self.kd = 0.00425
+            #self.ki = 0.000014
+
+            x = message.vector_1[1].x
+
+            # Line on left side of image
+            if x < image_center:
+                desired_x = width * 0.15
+
+            # Line on right side
+            else:
+                desired_x = width * 0.85
+
+            error = x - desired_x
+            self.integral += error
+
+            derivative = error - self.prev_error
+            self.prev_error = error
+
+            self.integral = max(min(self.integral, 1000), -1000)
+
+            self.target_turn = max(min(self.kp * error + self.ki * self.integral + self.kd * derivative, 1.0), -1.0)
+        
+        elif self.lane_mode == "STICK_LEFT":
+
+            self.target_speed = 0.5
+
+            x = message.vector_1[1].x
+
+            desired_x = width * 0.15
+            
+
+            error = x - desired_x
+
+            self.integral += error
+
+            derivative = error - self.prev_error
+            self.prev_error = error
+
+            self.integral = max(min(self.integral, 1000), -1000)
+
+            self.target_turn = max(min(self.kp * error + self.ki * self.integral + self.kd * derivative, 1.0), -1.0)
+
+        else: # self.lane_mode == "STICK_RIGHT"
+        
+            self.target_speed = 0.5
+
+            '''
+            # check if its actual right vector
+            if message.vector_2[1].x > image_center + margin:
+                x = message.vector_2[1].x
+            else:
+                # have to work on this
+                #self.lane_mode = "CENTER"
+                return 
+            '''
+            x = message.vector_2[1].x           
+                
+            desired_right = width * 0.15
+
+            error = x - desired_right - x
+            self.integral += error
+
+            derivative = error - self.prev_error
+            self.prev_error = error
+
+            self.integral = max(min(self.integral, 1000), -1000)
+
+            self.target_turn = max(min(self.kp * error + self.ki * self.integral + self.kd * derivative, 1.0), -1.0)
+
+
+
+
+
+    def lidar_callback(self, message):
+        #return
+        
+        # LIDAR sectors
+        front_left = message.ranges[195:239]
+        front_right = message.ranges[120:165]
+        left = message.ranges[240:300]
+        right = message.ranges[60:119]
+
+        front_right_vals = [x for x in front_right if np.isfinite(x)]
+        front_left_vals = [x for x in front_left if np.isfinite(x)]
+        right_vals = [x for x in right if np.isfinite(x)]
+        left_vals = [x for x in left if np.isfinite(x)]
+
+        front_right_min = min(front_right_vals) if front_right_vals else float('inf')
+        front_left_min = min(front_left_vals) if front_left_vals else float('inf')
+        right_avg = np.mean(right_vals) if right_vals else float("inf")
+        left_avg = np.mean(left_vals) if left_vals else float("inf")
+
+        # Estimate direction of objects
+        if front_right_min < self.detection_threshold:
+            self.obj_on_right = True
+        else:
+            self.obj_on_right = False
+
+        if front_left_min < self.detection_threshold:
+            self.obj_on_left = True
+        else:
+            self.obj_on_left = False
+
+        # Check if objects are still present in the same direction
+        #Check right side
+        if right_avg < self.min_threshold:
+            self.obj_still_on_right = True
+        else:
+            self.obj_still_on_right = False
+        
+        #Check left side
+        if left_avg < self.min_threshold:
+            self.obj_still_on_left = True
+        else:
+            self.obj_still_on_left = False
+
+        # Based on side checks, check if object is still present in the same direction
+        if self.obj_on_right:
+            self.lane_mode = "STICK_LEFT"
+
+        elif self.obj_on_left:
+            self.lane_mode = "STICK_RIGHT"
+
+        elif self.obj_still_on_right:
+            self.lane_mode = "STICK_LEFT"
+
+        elif self.obj_still_on_left:
+            self.lane_mode = "STICK_RIGHT"
+
+        else:
+            self.lane_mode = "CENTER"
+            
+    
+
+    def server_communication_callback(self, message):
+        """
+        Receives coordination commands from the server.
+        
+        GUIDELINE (Server Communication):
+        - Check if the message is destined for the Buggy (`message.dest == 1`).
+		- Do not forget to check for ACK messages from server
+        - The server communicates mission info in the `message.msg` payload string.
+        - Parse server instructions (e.g., patient pickup, target hospitals).
+        - Call `self.send_server_update` to report your status when you reach a checkpoint.
+        """
+        if message.dest == 1:
+            self.get_logger().info(f"Received Server Message: {message.msg}")
+            # Parse payload and update state machine destination/objectives here
+            pass
+
+    def send_server_update(self, text_msg):
+        """Sends status messages to the server. (Do not forget to send ACK messages to server)"""
+        server_msg = ServerCommunication()
+        server_msg.src = 1       # Source component: Buggy-1
+        server_msg.dest = 2      # Destination component: Server-2
+        server_msg.uid = 100     # Replace with a rolling message ID/counter
+        server_msg.ack = 0
+        server_msg.msg = text_msg
+        self.publisher_server.publish(server_msg)
+
+    def qr_detection_callback(self, message):
+        """
+        Receives QR codes scanned from the buildings.
+        
+        GUIDELINE (Patient/Hospital Identification):
+        - Parse the decoded string payload in `message.data` (e.g. "PATIENT_A", "HOSPITAL_B").
+        - If it matches your target destination, stop the vehicle close to the building (verify range using LIDAR),
+          perform the action (pick patient / drop patient), and communicate the arrival to the server.
+        """
+        self.get_logger().info(f"Heard QR code: {message.data}")
+        pass
+
+    def sign_board_callback(self, message):
+        """
+        Receives traffic sign boards.
+        
+        GUIDELINE (Sign Board Routing):
+        - Use the detected signs to choose the quickest route at intersections.
+        """
+        self.get_logger().info(f"Heard Sign Board: {message.data}")
+        pass
+
+    def debug_status(self):
+        self.get_logger().info(
+            f"Mode={self.lane_mode} | "
+            f"R={self.obj_on_right} | "
+            f"L={self.obj_on_left} | "
+            f"SR={self.obj_still_on_right} | "
+            f"SL={self.obj_still_on_left}"
+        )
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = LineFollower()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+if __name__ == '__main__':
+    main()

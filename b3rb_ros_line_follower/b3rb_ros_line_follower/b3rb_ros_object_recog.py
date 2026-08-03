@@ -56,6 +56,8 @@ class ObjectRecognizer(Node):
         self.published_label = None
         self.required_hits = 3
 
+        self.sign_visible = False
+
         self.subscription_target = self.create_subscription(
             String,
             "/target_patient",
@@ -75,9 +77,16 @@ class ObjectRecognizer(Node):
         sign_detected = self.classify_sign(image)
 
         if sign_detected is None:
+
+            if self.sign_visible:
+                msg = String()
+                msg.data = "CLEAR"
+                self.publisher_sign.publish(msg)
+
+            self.sign_visible = False
             self.last_label = None
             self.stable_count = 0
-            self.published_label = None #added to reset label even if next sign is the same as previous sign
+            self.published_label = None
             return
         #problem here is that whenever sign board is out of camera fov and again the same board comes in fov, it is detecting again, and mightrepeat the same command
         
@@ -92,15 +101,19 @@ class ObjectRecognizer(Node):
             msg = String()
             msg.data = sign_detected
             self.publisher_sign.publish(msg)
+            self.sign_visible = True
             self.published_label = sign_detected
             self.get_logger().info(f"Detected Sign Board: {sign_detected}")
 
-   
-   
-       
-
     def target_callback(self, msg):
         self.target_patient = msg.data
+
+        self.last_label = None
+        self.stable_count = 0
+        self.published_label = None
+        self.sign_visible = False
+
+        self.get_logger().info(f"Looking for patient: {self.target_patient}")
     
     def classify_sign(self, image):
 
@@ -165,7 +178,6 @@ class ObjectRecognizer(Node):
 
         return best_direction
        
-
 
 def main(args=None):
     rclpy.init(args=args)

@@ -78,6 +78,13 @@ class LineFollower(Node):
             '/ServerCommunication',
             QOS_PROFILE_DEFAULT)
 
+        # Publisher to send target patient info to the object recognizer
+        self.publisher_target = self.create_publisher(
+                String,
+                "/target_patient",
+                10
+            )
+
         # ------------------ State Variables & Timer ------------------
         
         # Default controls: drive straight slowly
@@ -125,7 +132,21 @@ class LineFollower(Node):
         self.detection_threshold = 1.5
 
         # Lane
-        self.lane_mode = "STICK_LEFT"  # Options: "CENTER", "STICK_LEFT", "STICK_RIGHT"
+        self.lane_mode = "CENTER"  # Options: "CENTER", "STICK_LEFT", "STICK_RIGHT", "TURN_LEFT", "TURN_RIGHT"
+
+        self.sign_detected = False
+        self.pending_turn = None
+        self.turn_pending = False
+        self.turn_requested = False
+        self.turning = False
+
+        self.turn_start_time = 0.0
+        self.min_turn_time = 0.6     # seconds
+
+        self.targets = ["A", "X", "B", "Y", "C", "Z"]
+        self.current_target = 0
+
+        self.set_target_patient(self.targets[self.current_target])
 
         # Timer to publish drive commands at 10Hz
         self.control_timer = self.create_timer(0.1, self.publish_drive_commands)
@@ -175,10 +196,14 @@ class LineFollower(Node):
         """
         Receives lane boundaries from the camera vector extractor
         """
+        self.edge_vector_count = message.vector_count
+
+        if self.turn_pending:
+            self.execute_turn()
+            return
+
         width = message.image_width
         image_center = width / 2.0
-
-        
 
         # No lane detected
         if message.vector_count == 0:
@@ -273,12 +298,12 @@ class LineFollower(Node):
             error = x - desired_right
             self.target_turn = self._pid_step("STICK_RIGHT", error)
 
-
-
-
-
     def lidar_callback(self, message):
         #return
+
+
+        if self.turn_requested:
+            return
         
         # LIDAR sectors
         front_left = message.ranges[195:239]
@@ -336,8 +361,6 @@ class LineFollower(Node):
         else:
             self.lane_mode = "CENTER"
             
-    
-
     def server_communication_callback(self, message):
         """
         Receives coordination commands from the server.
@@ -373,18 +396,26 @@ class LineFollower(Node):
         - If it matches your target destination, stop the vehicle close to the building (verify range using LIDAR),
           perform the action (pick patient / drop patient), and communicate the arrival to the server.
         """
+        #self.next_target()
         self.get_logger().info(f"Heard QR code: {message.data}")
         pass
 
     def sign_board_callback(self, message):
         """
         Receives traffic sign boards.
-        
-        GUIDELINE (Sign Board Routing):
-        - Use the detected signs to choose the quickest route at intersections.
         """
-        self.get_logger().info(f"Heard Sign Board: {message.data}")
-        pass
+        if message.data == "CLEAR":
+
+            self.sign_detected = False
+
+            if self.pending_turn is not None:
+                self.turn_pending = True
+
+            return
+
+        self.sign_detected = True
+        self.pending_turn = message.data
+        self.get_logger().info(f"Sign callback: {message.data}")
 
     def debug_status(self):
         self.get_logger().info(
@@ -394,6 +425,49 @@ class LineFollower(Node):
             f"SR={self.obj_still_on_right} | "
             f"SL={self.obj_still_on_left}"
         )
+
+        self.get_logger().info(
+            f"Mode={self.lane_mode} | "
+            f"Pending={self.pending_turn} | "
+            f"Sign={self.sign_detected} | "
+            f"TurnReq={self.turn_requested} | "
+            f"Turning={self.turning}"
+        )
+
+    def set_target_patient(self, patient):
+
+        msg = String()
+        msg.data = patient
+
+        self.publisher_target.publish(msg)
+
+        self.get_logger().info(f"Target patient: {patient}")
+
+    def next_target(self):
+
+        if self.current_target < len(self.targets) - 1:
+            self.current_target += 1
+            self.set_target_patient(self.targets[self.current_target])
+        else:
+            self.get_logger().info("Mission Complete!")
+
+    def execute_turn(self):
+
+        self.target_speed = 0.6
+
+        if self.pending_turn == "Left":
+            self.target_turn = -1.0
+
+        elif self.pending_turn == "Right":
+            self.target_turn = 1.0
+
+        else:
+            self.target_turn = 0.0
+
+        if self.edge_vector_count >= 1:
+
+            self.turn_pending = False
+            self.pending_turn = None
 
 def main(args=None):
     rclpy.init(args=args)
