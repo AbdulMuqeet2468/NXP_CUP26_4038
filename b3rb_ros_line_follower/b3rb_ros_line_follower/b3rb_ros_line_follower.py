@@ -1,4 +1,3 @@
-
 import rclpy
 from rclpy.node import Node
 import time
@@ -6,6 +5,7 @@ import math
 from sensor_msgs.msg import Joy, LaserScan
 from std_msgs.msg import String
 from synapse_msgs.msg import EdgeVectors, ServerCommunication
+import numpy as np
 
 QOS_PROFILE_DEFAULT = 10
 PI = math.pi
@@ -81,7 +81,7 @@ class LineFollower(Node):
         # ------------------ State Variables & Timer ------------------
         
         # Default controls: drive straight slowly
-        self.target_speed = 0.15
+        self.target_speed = 0.0
         self.target_turn = 0.0
 
         # State variables (You can add your own state flags / state machines here)
@@ -92,20 +92,46 @@ class LineFollower(Node):
         self.mission_completed = False
 
         #added
-        self.prev_error = 0.0
-        #tune values for PID controller
+        
+        # earlier good values
         #self.kp = 0.0076
         #self.kd = 0.004
         #self.ki = 0.0000125
 
+        # Tuned PID values for 'good' performance
+        # currently used for both single and double lane detection
         self.kp = 0.00775
         self.kd = 0.00425
         self.ki = 0.000014
 
-        self.integral = 0.0
+        # Separate integral/prev_error state per control regime, so switching
+        # between CENTER (one/two lane), STICK_LEFT, and STICK_RIGHT doesn't
+        # carry over error history from a different regime.
+        self.pid_state = {
+            "CENTER_TWO_LANE": {"integral": 0.0, "prev_error": 0.0},
+            "CENTER_ONE_LANE": {"integral": 0.0, "prev_error": 0.0},
+            "STICK_LEFT":      {"integral": 0.0, "prev_error": 0.0},
+            "STICK_RIGHT":     {"integral": 0.0, "prev_error": 0.0},
+        }
+
+        # LIDAR flags
+        self.obj_on_right = False
+        self.obj_on_left = False
+        self.obj_still_on_right = False
+        self.obj_still_on_left = False
+
+        # LIDAR distance thresholds 
+        self.min_threshold = 0.5
+        self.detection_threshold = 1.5
+
+        # Lane
+        self.lane_mode = "STICK_LEFT"  # Options: "CENTER", "STICK_LEFT", "STICK_RIGHT"
 
         # Timer to publish drive commands at 10Hz
         self.control_timer = self.create_timer(0.1, self.publish_drive_commands)
+
+        # Timer to debug status
+        self.create_timer(1.0, self.debug_status)
 
         self.get_logger().info("Line Follower controller initialized. Safe Drive-Straight Mode active.")
 
@@ -121,15 +147,34 @@ class LineFollower(Node):
         self.target_speed = float(max(min(speed, SPEED_MAX), -SPEED_MAX))
         self.target_turn = float(max(min(turn, TURN_MAX), -TURN_MAX))
 
+    def _pid_step(self, key, error):
+        """
+        Run one PID step using the integral/prev_error belonging ONLY to
+        `key` (e.g. "CENTER_TWO_LANE", "STICK_LEFT", ...), so different
+        control regimes never share or mix accumulated error state.
+        """
+        state = self.pid_state[key]
+        state["integral"] += error
+        state["integral"] = max(min(state["integral"], 1000), -1000)
+        derivative = error - state["prev_error"]
+        state["prev_error"] = error
+        turn = self.kp * error + self.ki * state["integral"] + self.kd * derivative
+        return max(min(turn, 1.0), -1.0)
+
+    def _reset_pid_state(self, key=None):
+        """Reset one regime's PID state, or all of them if key is None."""
+        if key is None:
+            for k in self.pid_state:
+                self.pid_state[k] = {"integral": 0.0, "prev_error": 0.0}
+        else:
+            self.pid_state[key] = {"integral": 0.0, "prev_error": 0.0}
+
     # ------------------ Callback Implementations ------------------
 
     def edge_vectors_callback(self, message):
         """
         Receives lane boundaries from the camera vector extractor
         """
-        
-      
-      
         width = message.image_width
         image_center = width / 2.0
 
@@ -140,78 +185,158 @@ class LineFollower(Node):
             self.target_turn = 0.0
             return
 
-        
-
-
-        # ------------------ Two lanes ------------------
-        if message.vector_count == 2:
-
-            self.target_speed = 1.0
-            self.kp = 0.00775
-            self.kd = 0.00425
-            self.ki = 0.000014
-
+        # Compute lane geometry once (same as CENTER's two-lane case) so
+        # STICK_LEFT and STICK_RIGHT can both target a point relative to the
+        # actual lane, exactly like CENTER does, instead of one side using a
+        # dynamic lane-relative target and the other a hardcoded fixed pixel
+        # value (that asymmetry was the actual bug).
+        two_lanes = (message.vector_count == 2)
+        if two_lanes:
             left_x = message.vector_1[1].x
             right_x = message.vector_2[1].x
-
+            lane_width = right_x - left_x
+            margin = 0.65 * lane_width
             lane_center = (left_x + right_x) / 2.0
 
-            # PID control for lane following    
-            error = lane_center - image_center
-            self.integral += error
-            derivative = error - self.prev_error
-            self.prev_error = error
+        if self.lane_mode == "CENTER":
+            # ------------------ Two lanes ------------------
+            if two_lanes:
 
-            self.integral = max(min(self.integral, 1000), -1000)
+                self.target_speed = 1.0
 
-            self.target_turn = max(min(self.kp * error + self.ki * self.integral + self.kd * derivative, 1.0), -1.0)
-            return
+                # PID control for two lane control
+                #self.kp = 0.00775
+                #self.kd = 0.00425
+                #self.ki = 0.000014
+
+                # PID control for lane following    
+                error = lane_center - image_center
+                self.target_turn = self._pid_step("CENTER_TWO_LANE", error)
+                return
        
-        # ------------------ One lane ------------------
-        self.target_speed = 0.685
-        self.kp = 0.00775
-        self.kd = 0.00425
-        self.ki = 0.000014
+            # ------------------ One lane ------------------
+            self.target_speed = 0.685
 
-        x = message.vector_1[1].x
+            #trying values for single lane control
+            #self.kp = 0.00775
+            #self.kd = 0.00425
+            #self.ki = 0.000014
 
-        # Line on left side of image
-        if x < image_center:
-            desired_x = width * 0.15
+            x = message.vector_1[1].x
 
-        # Line on right side
-        else:
-            desired_x = width * 0.85
+            # Line on left side of image
+            if x < image_center:
+                desired_x = width * 0.15
 
-        error = x - desired_x
-        self.integral += error
+            # Line on right side
+            else:
+                desired_x = width * 0.85
 
-        derivative = error - self.prev_error
-        self.prev_error = error
-
-        self.integral = max(min(self.integral, 1000), -1000)
-
-        self.target_turn = max(min(self.kp * error + self.ki * self.integral + self.kd * derivative, 1.0), -1.0)
+            error = x - desired_x
+            self.target_turn = self._pid_step("CENTER_ONE_LANE", error)
         
+        elif self.lane_mode == "STICK_LEFT":
+
+            self.target_speed = 0.5
+
+            x = message.vector_1[1].x
+
+            if two_lanes:
+                # Lane-relative target, mirroring STICK_RIGHT and CENTER:
+                # aim for a point `margin` to the left of the actual lane
+                # center, using the real detected lane geometry.
+                desired_x = lane_center - margin
+            else:
+                # Only one lane visible - no lane_center to offset from, so
+                # fall back to a fixed pixel target (same approximation
+                # CENTER's one-lane case already uses).
+                desired_x = width * 0.15
+
+            error = x - desired_x
+
+            self.target_turn = self._pid_step("STICK_LEFT", error)
+
+        else: # self.lane_mode == "STICK_RIGHT"
         
+            self.target_speed = 0.5
+
+            if two_lanes:
+                x = message.vector_2[1].x
+                desired_right = lane_center + margin
+            else:
+                # Only one lane visible - lane_center/margin don't exist this
+                # cycle, so fall back to a fixed pixel target instead of
+                # referencing undefined variables (this crashed before).
+                x = message.vector_1[1].x
+                desired_right = width * 0.85
+
+            error = x - desired_right
+            self.target_turn = self._pid_step("STICK_RIGHT", error)
+
+
+
 
 
     def lidar_callback(self, message):
-        """
-        Receives LIDAR range measurements.
+        #return
         
-        GUIDELINE (Obstacle Avoidance & Building Range):
-        - `message.ranges` is an array of distances in meters around the buggy.
-        - The laser scans cover 360 degrees. Find which indices correspond to the front of the buggy.
-        - If a range value in the front sector is below a threshold (e.g. 0.8m), flag an obstacle.
-        - Write obstacle avoidance maneuvers (e.g. stop, steer left/right around the block, and merge back).
-        - Use LIDAR side-ranges to verify distance to building/QR signs before patient pickup/hospital drop actions.
-        """
-        # HINTS:
-        # num_readings = len(message.ranges)
-        # front_sector = message.ranges[int(num_readings * 7/18): int(num_readings * 11/18)]
-        # min_front_dist = min(front_sector)
-        pass
+        # LIDAR sectors
+        front_left = message.ranges[195:239]
+        front_right = message.ranges[120:165]
+        left = message.ranges[240:300]
+        right = message.ranges[60:119]
+
+        front_right_vals = [x for x in front_right if np.isfinite(x)]
+        front_left_vals = [x for x in front_left if np.isfinite(x)]
+        right_vals = [x for x in right if np.isfinite(x)]
+        left_vals = [x for x in left if np.isfinite(x)]
+
+        front_right_min = min(front_right_vals) if front_right_vals else float('inf')
+        front_left_min = min(front_left_vals) if front_left_vals else float('inf')
+        right_avg = np.mean(right_vals) if right_vals else float("inf")
+        left_avg = np.mean(left_vals) if left_vals else float("inf")
+
+        # Estimate direction of objects
+        if front_right_min < self.detection_threshold:
+            self.obj_on_right = True
+        else:
+            self.obj_on_right = False
+
+        if front_left_min < self.detection_threshold:
+            self.obj_on_left = True
+        else:
+            self.obj_on_left = False
+
+        # Check if objects are still present in the same direction
+        #Check right side
+        if right_avg < self.min_threshold:
+            self.obj_still_on_right = True
+        else:
+            self.obj_still_on_right = False
+        
+        #Check left side
+        if left_avg < self.min_threshold:
+            self.obj_still_on_left = True
+        else:
+            self.obj_still_on_left = False
+
+        # Based on side checks, check if object is still present in the same direction
+        if self.obj_on_right:
+            self.lane_mode = "STICK_LEFT"
+
+        elif self.obj_on_left:
+            self.lane_mode = "STICK_RIGHT"
+
+        elif self.obj_still_on_right:
+            self.lane_mode = "STICK_LEFT"
+
+        elif self.obj_still_on_left:
+            self.lane_mode = "STICK_RIGHT"
+
+        else:
+            self.lane_mode = "CENTER"
+            
+    
 
     def server_communication_callback(self, message):
         """
@@ -260,6 +385,15 @@ class LineFollower(Node):
         """
         self.get_logger().info(f"Heard Sign Board: {message.data}")
         pass
+
+    def debug_status(self):
+        self.get_logger().info(
+            f"Mode={self.lane_mode} | "
+            f"R={self.obj_on_right} | "
+            f"L={self.obj_on_left} | "
+            f"SR={self.obj_still_on_right} | "
+            f"SL={self.obj_still_on_left}"
+        )
 
 def main(args=None):
     rclpy.init(args=args)
