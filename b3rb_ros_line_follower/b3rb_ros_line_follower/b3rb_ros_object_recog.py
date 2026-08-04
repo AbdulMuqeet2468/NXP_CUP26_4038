@@ -17,6 +17,8 @@ import os
 import cv2
 import numpy as np
 from ultralytics import YOLO
+from sensor_msgs.msg import Image
+from cv_bridge import CvBridge
 
 import rclpy
 from rclpy.node import Node
@@ -45,6 +47,14 @@ class ObjectRecognizer(Node):
             10,
         )
 
+        self.bridge = CvBridge()
+        self.crop_ratio = 0.25  # keep top X% of image, tune this
+
+        self.publisher_cropped_img = self.create_publisher(
+            Image,
+            '/debug/cropped_image',
+            10)
+
         
         model_path = os.path.join(package_share, "best.pt")
 
@@ -54,7 +64,7 @@ class ObjectRecognizer(Node):
         self.last_label = None
         self.stable_count = 0
         self.published_label = None
-        self.required_hits = 3
+        self.required_hits = 2
 
         self.sign_visible = False
 
@@ -65,31 +75,52 @@ class ObjectRecognizer(Node):
             10
         )
 
+        self.miss_count = 0
+
         self.get_logger().info("Object Recognizer Node started. Waiting for images...")
 
     def camera_image_callback(self, message):
         np_arr = np.frombuffer(message.data, np.uint8)
+        #image = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+
         image = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
 
         if image is None:
             return
+
+        h, w = image.shape[:2]
+        image = image[0:int(h * self.crop_ratio), 0:w]
+
+        # publish cropped image for viewing
+        img_msg = self.bridge.cv2_to_imgmsg(image, encoding='bgr8')
+        img_msg.header.stamp = self.get_clock().now().to_msg()
+        self.publisher_cropped_img.publish(img_msg)
+                
+        #if image is None:
+        #    return
 
         sign_detected = self.classify_sign(image)
 
         if sign_detected is None:
 
             if self.sign_visible:
-                msg = String()
-                msg.data = "CLEAR"
-                self.publisher_sign.publish(msg)
+                self.miss_count += 1
 
-            self.sign_visible = False
-            self.last_label = None
-            self.stable_count = 0
-            self.published_label = None
+                if self.miss_count >= self.required_hits:
+                    msg = String()
+                    msg.data = "CLEAR"
+                    self.publisher_sign.publish(msg)
+
+                    self.sign_visible = False
+                    self.last_label = None
+                    self.stable_count = 0
+                    self.published_label = None
+                    self.miss_count = 0
+            # else: nothing was visible anyway, nothing to clear/reset
             return
-        #problem here is that whenever sign board is out of camera fov and again the same board comes in fov, it is detecting again, and mightrepeat the same command
-        
+
+        # sign is present this frame -> reset miss streak
+        self.miss_count = 0
 
         if sign_detected == self.last_label:
             self.stable_count += 1

@@ -28,7 +28,7 @@ class LineFollower(Node):
         super().__init__('line_follower')
 
         # ------------------ Subscriptions ------------------
-        
+        print("RUNNER VERSION 2")
         # 1. Lane Edge Vectors (from edge_vectors_publisher)
         self.subscription_vectors = self.create_subscription(
             EdgeVectors,
@@ -129,19 +129,19 @@ class LineFollower(Node):
 
         # LIDAR distance thresholds 
         self.min_threshold = 0.5
-        self.detection_threshold = 1.5
+        self.detection_threshold = 1.5 #1.5
 
         # Lane
         self.lane_mode = "CENTER"  # Options: "CENTER", "STICK_LEFT", "STICK_RIGHT", "TURN_LEFT", "TURN_RIGHT"
 
         self.sign_detected = False
         self.pending_turn = None
-        self.turn_pending = False
-        self.turn_requested = False
-        self.turning = False
+        self.turn_now = False
+        self.lane_lost_during_turn = False
+
 
         self.turn_start_time = 0.0
-        self.min_turn_time = 0.6     # seconds
+        self.min_turn_time = 2.5     # seconds
 
         self.targets = ["A", "X", "B", "Y", "C", "Z"]
         self.current_target = 0
@@ -196,9 +196,10 @@ class LineFollower(Node):
         """
         Receives lane boundaries from the camera vector extractor
         """
+        
         self.edge_vector_count = message.vector_count
 
-        if self.turn_pending:
+        if self.turn_now:
             self.execute_turn()
             return
 
@@ -262,6 +263,8 @@ class LineFollower(Node):
         
         elif self.lane_mode == "STICK_LEFT":
 
+            if self.turn_now:
+                return
             self.target_speed = 0.5
 
             x = message.vector_1[1].x
@@ -283,6 +286,9 @@ class LineFollower(Node):
 
         else: # self.lane_mode == "STICK_RIGHT"
         
+            if self.turn_now:
+                return
+
             self.target_speed = 0.5
 
             if two_lanes:
@@ -302,7 +308,7 @@ class LineFollower(Node):
         #return
 
 
-        if self.turn_requested:
+        if self.turn_now and not self.sign_detected:
             return
         
         # LIDAR sectors
@@ -401,37 +407,31 @@ class LineFollower(Node):
         pass
 
     def sign_board_callback(self, message):
-        """
-        Receives traffic sign boards.
-        """
+
+
         if message.data == "CLEAR":
 
             self.sign_detected = False
 
             if self.pending_turn is not None:
-                self.turn_pending = True
+                self.turn_now = True
+                self.lane_lost_during_turn = False 
 
             return
 
         self.sign_detected = True
         self.pending_turn = message.data
-        self.get_logger().info(f"Sign callback: {message.data}")
 
+        
     def debug_status(self):
         self.get_logger().info(
-            f"Mode={self.lane_mode} | "
-            f"R={self.obj_on_right} | "
-            f"L={self.obj_on_left} | "
-            f"SR={self.obj_still_on_right} | "
-            f"SL={self.obj_still_on_left}"
+            f"Mode={self.lane_mode}"
         )
 
         self.get_logger().info(
-            f"Mode={self.lane_mode} | "
             f"Pending={self.pending_turn} | "
             f"Sign={self.sign_detected} | "
-            f"TurnReq={self.turn_requested} | "
-            f"Turning={self.turning}"
+            f"TurnNow={self.turn_now}"
         )
 
     def set_target_patient(self, patient):
@@ -453,21 +453,33 @@ class LineFollower(Node):
 
     def execute_turn(self):
 
-        self.target_speed = 0.6
+        self.target_speed = 0.75
 
-        if self.pending_turn == "Left":
-            self.target_turn = -1.0
+        if self.edge_vector_count == 0:
+            self.lane_lost_during_turn = True
 
-        elif self.pending_turn == "Right":
-            self.target_turn = 1.0
+        step = 0.0
+        if self.pending_turn == "Right":
+            step = -0.00085
+        elif self.pending_turn == "Left":
+            step = 0.00085
 
+        # Keep steering as long as we haven't yet lost the lane, OR
+        # we're currently mid-turn with lane still lost.
+        if not self.lane_lost_during_turn or self.edge_vector_count == 0:
+            self.target_turn += step
         else:
+            # Lane was lost earlier AND is now found again -> turn succeeded
             self.target_turn = 0.0
-
-        if self.edge_vector_count >= 1:
-
-            self.turn_pending = False
+            self.turn_now = False
             self.pending_turn = None
+            self.lane_lost_during_turn = False
+        self.get_logger().info(
+            f"Lost={self.lane_lost_during_turn} | "
+            f"Edge={self.edge_vector_count} | "
+            f"TurnNow={self.turn_now} | "
+            f"turn={self.target_turn:.4f} | " 
+        )
 
 def main(args=None):
     rclpy.init(args=args)
