@@ -148,6 +148,14 @@ class LineFollower(Node):
 
         self.set_target_patient(self.targets[self.current_target])
 
+        self.lane_lost_during_turn = False
+        self.lane_lost_start_time = 0.0
+
+        self.turn_step_base = 0.00085
+        self.turn_step_max = 0.004
+        self.turn_escalate_after = 2.5   # seconds before escalating
+        self.turn_escalate_rate = 0.0065  # extra step added per second past that
+
         # Timer to publish drive commands at 10Hz
         self.control_timer = self.create_timer(0.1, self.publish_drive_commands)
 
@@ -416,6 +424,7 @@ class LineFollower(Node):
             if self.pending_turn is not None:
                 self.turn_now = True
                 self.lane_lost_during_turn = False 
+                self.lane_lost_start_time = 0.0
 
             return
 
@@ -456,30 +465,53 @@ class LineFollower(Node):
         self.target_speed = 0.75
 
         if self.edge_vector_count == 0:
-            self.lane_lost_during_turn = True
+            if not self.lane_lost_during_turn:
+                self.lane_lost_during_turn = True
+                self.lane_lost_start_time = time.time()
+                self.get_logger().info(
+                    f"[TURN] Lane lost. pending={self.pending_turn} | "
+                    f"starting escalation timer"
+                )
 
-        step = 0.0
-        if self.pending_turn == "Right":
-            step = -0.00085
-        elif self.pending_turn == "Left":
-            step = 0.00085
-
-        # Keep steering as long as we haven't yet lost the lane, OR
-        # we're currently mid-turn with lane still lost.
         if not self.lane_lost_during_turn or self.edge_vector_count == 0:
+
+            lost_duration = 0.0
+            if self.lane_lost_start_time > 0.0:
+                lost_duration = time.time() - self.lane_lost_start_time
+
+            step_mag = self.turn_step_base
+            if lost_duration > self.turn_escalate_after:
+                step_mag += (lost_duration - self.turn_escalate_after) * self.turn_escalate_rate
+                step_mag = min(step_mag, self.turn_step_max)
+
+            step = 0.0
+            if self.pending_turn == "Right":
+                step = -step_mag
+            elif self.pending_turn == "Left":
+                step = step_mag
+
             self.target_turn += step
+            self.target_turn = max(min(self.target_turn, 1.0), -1.0)
+
+            self.get_logger().info(
+                f"[TURN] pending={self.pending_turn} | "
+                f"edge_count={self.edge_vector_count} | "
+                f"lost_duration={lost_duration:.2f}s | "
+                f"step_mag={step_mag:.5f} | "
+                f"target_turn={self.target_turn:.4f}"
+            )
+
         else:
-            # Lane was lost earlier AND is now found again -> turn succeeded
+            self.get_logger().info(
+                f"[TURN] Lane reacquired. pending={self.pending_turn} | "
+                f"turn complete, resetting state"
+            )
+            # lane was lost earlier AND is now found again -> turn succeeded
             self.target_turn = 0.0
             self.turn_now = False
             self.pending_turn = None
             self.lane_lost_during_turn = False
-        self.get_logger().info(
-            f"Lost={self.lane_lost_during_turn} | "
-            f"Edge={self.edge_vector_count} | "
-            f"TurnNow={self.turn_now} | "
-            f"turn={self.target_turn:.4f} | " 
-        )
+            self.lane_lost_start_time = 0.0
 
 def main(args=None):
     rclpy.init(args=args)
