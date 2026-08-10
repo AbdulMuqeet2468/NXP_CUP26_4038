@@ -144,6 +144,14 @@ class LineFollower(Node):
         self.turn_start_time = 0.0
         self.min_turn_time = 2.5     # seconds
 
+        # Sub-state for the new turn logic:
+        # "STRAIGHT" -> drive straight until lane vanishes (vector_count == 0)
+        # "TURNING"  -> apply fixed turn value until lane reappears (vector_count >= 1)
+        self.turn_phase = "STRAIGHT"
+
+        # Fixed turn magnitude used during the TURNING phase
+        self.turn_fixed_value = 0.45
+
         # Have to change this
         self.targets = ["A", "X", "B", "Y", "C", "Z"]
         self.current_target = 0
@@ -429,6 +437,9 @@ class LineFollower(Node):
                 self.lane_lost_during_turn = False 
                 self.lane_lost_start_time = 0.0
 
+                # New turn is starting -> always begin in STRAIGHT phase
+                self.turn_phase = "STRAIGHT"
+
             return
 
         self.sign_detected = True
@@ -464,57 +475,69 @@ class LineFollower(Node):
             self.get_logger().info("Mission Complete!")
 
     def execute_turn(self):
+        """
+        Two-phase turn logic:
 
-        self.target_speed = 0.75
+        Phase "STRAIGHT":
+            Keep driving straight (speed=0.685, turn=0.0) as long as the
+            lane is still visible. The moment vector_count drops to 0
+            (lane disappears, meaning we've reached the intersection/turn
+            point), switch to phase "TURNING".
 
-        if self.edge_vector_count == 0:
-            if not self.lane_lost_during_turn:
-                self.lane_lost_during_turn = True
-                self.lane_lost_start_time = time.time()
+        Phase "TURNING":
+            Apply a fixed turn value (+/- turn_fixed_value depending on
+            pending_turn direction) and keep speed at 0.685. Keep doing
+            this until the lane reappears (vector_count >= 1), at which
+            point the turn is considered complete: reset everything and
+            hand control back to normal CENTER lane-following.
+        """
+
+        self.target_speed = 0.685
+
+        # ---------------- Phase 1: drive straight until lane disappears ----------------
+        if self.turn_phase == "STRAIGHT":
+            self.target_turn = 0.0
+
+            if self.edge_vector_count == 0:
+                self.turn_phase = "TURNING"
                 self.get_logger().info(
-                    f"[TURN] Lane lost. pending={self.pending_turn} | "
-                    f"starting escalation timer"
+                    f"[TURN] Lane lost -> switching to TURNING phase | "
+                    f"pending={self.pending_turn}"
                 )
 
-        if not self.lane_lost_during_turn or self.edge_vector_count == 0:
+        # ---------------- Phase 2: apply fixed turn until lane reappears ----------------
+        elif self.turn_phase == "TURNING":
 
-            lost_duration = 0.0
-            if self.lane_lost_start_time > 0.0:
-                lost_duration = time.time() - self.lane_lost_start_time
-
-            step_mag = self.turn_step_base
-            if lost_duration > self.turn_escalate_after:
-                step_mag += (lost_duration - self.turn_escalate_after) * self.turn_escalate_rate
-                step_mag = min(step_mag, self.turn_step_max)
-
-            step = 0.0
-            if self.pending_turn == "Right":
-                step = -step_mag
-            elif self.pending_turn == "Left":
-                step = step_mag
-
-            self.target_turn += step
-            self.target_turn = max(min(self.target_turn, 1.0), -1.0)
+            if self.pending_turn == "Left":
+                self.target_turn = self.turn_fixed_value
+            elif self.pending_turn == "Right":
+                self.target_turn = -self.turn_fixed_value
+            else:
+                # Safety fallback - no valid pending turn, don't spin blindly
+                self.target_turn = 0.0
 
             self.get_logger().info(
-                f"[TURN] pending={self.pending_turn} | "
+                f"[TURN] Turning | pending={self.pending_turn} | "
                 f"edge_count={self.edge_vector_count} | "
-                f"lost_duration={lost_duration:.2f}s | "
-                f"step_mag={step_mag:.5f} | "
                 f"target_turn={self.target_turn:.4f}"
             )
 
-        else:
-            self.get_logger().info(
-                f"[TURN] Lane reacquired. pending={self.pending_turn} | "
-                f"turn complete, resetting state"
-            )
-            # lane was lost earlier AND is now found again -> turn succeeded
-            self.target_turn = 0.0
-            self.turn_now = False
-            self.pending_turn = None
-            self.lane_lost_during_turn = False
-            self.lane_lost_start_time = 0.0
+            if self.edge_vector_count >= 1:
+                # Lane reacquired -> turn is complete
+                self.get_logger().info(
+                    f"[TURN] Lane reacquired -> turn complete, "
+                    f"resuming normal lane following"
+                )
+
+                self.turn_now = False
+                self.turn_phase = "STRAIGHT"   # reset for next turn
+                self.pending_turn = None
+                self.target_turn = 0.0
+                self.lane_mode = "CENTER"
+
+                # Clear PID history so old turn-time error doesn't leak
+                # into fresh lane-following control
+                self._reset_pid_state()
 
 def main(args=None):
     rclpy.init(args=args)
