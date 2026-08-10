@@ -87,7 +87,7 @@ class LineFollower(Node):
 
         # ------------------ State Variables & Timer ------------------
         
-        # Default controls: drive straight slowly
+        # Default controls
         self.target_speed = 0.0
         self.target_turn = 0.0
 
@@ -134,20 +134,23 @@ class LineFollower(Node):
         # Lane
         self.lane_mode = "CENTER"  # Options: "CENTER", "STICK_LEFT", "STICK_RIGHT", "TURN_LEFT", "TURN_RIGHT"
 
+        # Flags for turn execution
         self.sign_detected = False
         self.pending_turn = None
         self.turn_now = False
         self.lane_lost_during_turn = False
 
-
+        # Turn timing variables
         self.turn_start_time = 0.0
         self.min_turn_time = 2.5     # seconds
 
+        # Have to change this
         self.targets = ["A", "X", "B", "Y", "C", "Z"]
         self.current_target = 0
 
         self.set_target_patient(self.targets[self.current_target])
 
+        # turning logic parameters (under review)
         self.lane_lost_during_turn = False
         self.lane_lost_start_time = 0.0
 
@@ -162,7 +165,7 @@ class LineFollower(Node):
         # Timer to debug status
         self.create_timer(1.0, self.debug_status)
 
-        self.get_logger().info("Line Follower controller initialized. Safe Drive-Straight Mode active.")
+        self.get_logger().info("Line Follower controller initialized. Starting Mission.")
 
     def publish_drive_commands(self):
         """Timer callback that periodically publishes the current speed and steer command."""
