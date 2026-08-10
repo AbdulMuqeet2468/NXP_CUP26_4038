@@ -6,6 +6,7 @@ from sensor_msgs.msg import Joy, LaserScan
 from std_msgs.msg import String
 from synapse_msgs.msg import EdgeVectors, ServerCommunication
 import numpy as np
+import random
 
 QOS_PROFILE_DEFAULT = 10
 PI = math.pi
@@ -167,6 +168,51 @@ class LineFollower(Node):
         self.turn_escalate_after = 2.5   # seconds before escalating
         self.turn_escalate_rate = 0.0065  # extra step added per second past that
 
+        # ---- Mission search state ----
+        self.search_patient = True     # informational flag, mirrors mission_phase
+        self.search_hospital = False   # informational flag, mirrors mission_phase
+
+        # Detector format -> server format ("A", "X", etc. per protocol)
+        self.qr_to_server_patient = {"PATIENT_1": "A", "PATIENT_2": "B", "PATIENT_3": "C"}
+        self.qr_to_server_hospital = {"HOSPITAL_1": "X", "HOSPITAL_2": "Y", "HOSPITAL_3": "Z"}
+
+        # Which QR payloads mean "patient" vs "hospital". Adjust these sets
+        # if your actual codes differ.
+        self.patient_codes = set(self.qr_to_server_patient.keys())
+        self.hospital_codes = set(self.qr_to_server_hospital.keys())
+
+        # ---- Mission phase state machine ----
+        # SEARCHING_PATIENT          -> normal driving, looking for a patient QR
+        # PATIENT_QR_READ_WAIT_ACK   -> sent patient id to server, waiting for ack
+        # WAITING_HOSPITAL_LOCATION  -> acked; waiting for server to send hospital
+        # SEARCHING_HOSPITAL         -> normal driving, looking for target hospital QR
+        # HOSPITAL_QR_READ_WAIT_ACK  -> sent hospital-found to server, waiting for ack
+        # WAITING_NEXT_PATIENT       -> acked; waiting for server to send next patient
+        self.mission_phase = "SEARCHING_PATIENT"
+
+        # Buggy must stay parked (stopped) in all of these phases - it's
+        # mid-handshake with the server and shouldn't keep driving.
+        self.waiting_phases = {
+            "PATIENT_QR_READ_WAIT_ACK",
+            "WAITING_HOSPITAL_LOCATION",
+            "HOSPITAL_QR_READ_WAIT_ACK",
+            "WAITING_NEXT_PATIENT",
+        }
+
+        # Tracks the message WE sent that we're waiting on an ack for.
+        # {"uid": <int>, "purpose": "PATIENT_FOUND" | "HOSPITAL_FOUND"} or None
+        self.pending_outgoing = None
+
+        # ---- QR handling state ----
+        # qr_state: "IDLE"    -> normal driving, just watching for a QR
+        #           "READING" -> QR currently visible, drive straight
+        #           "WAITING" -> QR just went out of view, stop + process it
+        self.qr_state = "IDLE"
+        self.qr_is_visible = False
+        self.last_qr_value = None
+
+        self.uid = None  # last message uid we sent to the server
+
         # Timer to publish drive commands at 10Hz
         self.control_timer = self.create_timer(0.1, self.publish_drive_commands)
 
@@ -218,8 +264,22 @@ class LineFollower(Node):
         
         self.edge_vector_count = message.vector_count
 
+        # While we're mid-handshake with the server (sent a message and
+        # waiting for ack, or waiting for the server's next instruction),
+        # stay completely parked. Don't drive, don't turn.
+        if self.mission_phase in self.waiting_phases:
+            self.target_speed = 0.0
+            self.target_turn = 0.0
+            return
+
         if self.turn_now:
             self.execute_turn()
+            return
+
+        # While a QR is being read or just finished being read, override
+        # normal lane-following entirely.
+        if self.qr_state in ("READING", "WAITING"):
+            self.handle_qr_state()
             return
 
         width = message.image_width
@@ -388,42 +448,124 @@ class LineFollower(Node):
             
     def server_communication_callback(self, message):
         """
-        Receives coordination commands from the server.
-        
-        GUIDELINE (Server Communication):
-        - Check if the message is destined for the Buggy (`message.dest == 1`).
-		- Do not forget to check for ACK messages from server
-        - The server communicates mission info in the `message.msg` payload string.
-        - Parse server instructions (e.g., patient pickup, target hospitals).
-        - Call `self.send_server_update` to report your status when you reach a checkpoint.
-        """
-        if message.dest == 1:
-            self.get_logger().info(f"Received Server Message: {message.msg}")
-            # Parse payload and update state machine destination/objectives here
-            pass
+        Handles two kinds of incoming server messages:
 
-    def send_server_update(self, text_msg):
-        """Sends status messages to the server. (Do not forget to send ACK messages to server)"""
-        server_msg = ServerCommunication()
-        server_msg.src = 1       # Source component: Buggy-1
-        server_msg.dest = 2      # Destination component: Server-2
-        server_msg.uid = 100     # Replace with a rolling message ID/counter
-        server_msg.ack = 0
-        server_msg.msg = text_msg
-        self.publisher_server.publish(server_msg)
+        1. ack == 1  -> The server is acking something WE sent. Match the
+           uid against self.pending_outgoing, then advance the mission
+           phase depending on what that message's purpose was.
+
+        2. ack == 0  -> The server is pushing NEW info to us (hospital
+           location or next patient target). We must ack it back
+           immediately, then act on the content depending on which
+           phase we're currently waiting in.
+        """
+        if message.dest != 1:
+            return  # not addressed to the buggy
+
+        self.get_logger().info(
+            f"[SERVER] Received src={message.src} uid={message.uid} "
+            f"ack={message.ack} msg='{message.msg}'"
+        )
+
+        # ---------------- Case 1: server acking OUR message ----------------
+        if message.ack == 1:
+            if self.pending_outgoing is not None and message.uid == self.pending_outgoing["uid"]:
+                purpose = self.pending_outgoing["purpose"]
+                self.pending_outgoing = None
+
+                self.get_logger().info(f"[SERVER] Ack confirmed uid={message.uid} purpose={purpose}")
+
+                if purpose == "PATIENT_FOUND":
+                    # Server confirmed receipt of patient id.
+                    # Next: wait for server to send hospital location.
+                    self.mission_phase = "WAITING_HOSPITAL_LOCATION"
+
+                elif purpose == "HOSPITAL_FOUND":
+                    # Server confirmed receipt of hospital-found.
+                    # Next: wait for server to send the next patient target.
+                    self.mission_phase = "WAITING_NEXT_PATIENT"
+            else:
+                self.get_logger().warn(
+                    f"[SERVER] Got ack for uid={message.uid} but no matching pending message"
+                )
+            return
+
+        # ---------------- Case 2: new message from server, needs our ack ----------------
+        if message.ack == 0:
+            # Ack it immediately, regardless of content, per protocol.
+            self._publish_server_message(dest=2, uid=message.uid, ack=1, msg="")
+            self.get_logger().info(f"[SERVER] Acked uid={message.uid}")
+
+            if self.mission_phase == "WAITING_HOSPITAL_LOCATION":
+                hospital = message.msg
+                self.hospital_id = hospital
+                self.current_destination = hospital
+
+                self.search_patient = False
+                self.search_hospital = True
+                self.mission_phase = "SEARCHING_HOSPITAL"
+
+                # Tell the detector node to now look for the hospital target,
+                # not the patient. (Same topic - detector treats it as
+                # "the thing to currently search for".)
+                self.set_target_patient(hospital)
+
+                self.get_logger().info(
+                    f"[SERVER] Target hospital set to '{hospital}'. Resuming mission."
+                )
+
+            elif self.mission_phase == "WAITING_NEXT_PATIENT":
+                patient = message.msg
+                self.patient_id = None
+                self.hospital_id = None
+                self.current_destination = None
+
+                self.search_patient = True
+                self.search_hospital = False
+                self.mission_phase = "SEARCHING_PATIENT"
+
+                # Tell the object_recognizer node about the new target patient
+                self.set_target_patient(patient)
+
+                self.get_logger().info(
+                    f"[SERVER] Next target patient: '{patient}'. Resuming mission."
+                )
+
+            else:
+                self.get_logger().warn(
+                    f"[SERVER] Unexpected unsolicited message '{message.msg}' "
+                    f"while in phase {self.mission_phase}"
+                )
 
     def qr_detection_callback(self, message):
         """
         Receives QR codes scanned from the buildings.
-        
-        GUIDELINE (Patient/Hospital Identification):
-        - Parse the decoded string payload in `message.data` (e.g. "PATIENT_A", "HOSPITAL_B").
-        - If it matches your target destination, stop the vehicle close to the building (verify range using LIDAR),
-          perform the action (pick patient / drop patient), and communicate the arrival to the server.
+
+        ASSUMPTION: /qr_detection publishes continuously, sending an
+        empty string (or "NONE") when no QR is currently in frame, and
+        the decoded QR string when one IS in frame. If your qr_detector
+        node instead only publishes when it sees something (i.e. never
+        publishes "nothing visible"), you'll need a different way to
+        detect the visible->not-visible transition (e.g. a timeout since
+        the last message). Adjust `qr_now_visible` below accordingly.
         """
-        #self.next_target()
-        self.get_logger().info(f"Heard QR code: {message.data}")
-        pass
+        data = message.data.strip()
+        qr_now_visible = (data != "" and data != "NONE")
+
+        if qr_now_visible:
+            self.last_qr_value = data
+
+        # Transition: not visible -> visible => start of a QR read
+        if qr_now_visible and not self.qr_is_visible:
+            self.get_logger().info(f"[QR] QR code detected: {data}")
+            self.qr_state = "READING"
+
+        # Transition: visible -> not visible => QR finished, go wait/process
+        if (not qr_now_visible) and self.qr_is_visible and self.qr_state == "READING":
+            self.get_logger().info("[QR] QR no longer visible. Stopping to process.")
+            self.qr_state = "WAITING"
+
+        self.qr_is_visible = qr_now_visible
 
     def sign_board_callback(self, message):
 
@@ -445,17 +587,47 @@ class LineFollower(Node):
         self.sign_detected = True
         self.pending_turn = message.data
 
+    def generate_uid(self):
+        """Generate a message uid. Random int is fine per current protocol."""
+        return random.randint(1, 127)
+
+    def _publish_server_message(self, dest, uid, ack, msg):
+        """Low-level publish - builds and sends one ServerCommunication message."""
+        server_msg = ServerCommunication()
+        server_msg.src = 1        # Buggy is always src=1
+        server_msg.dest = dest    # Server is dest=2
+        server_msg.uid = uid
+        server_msg.ack = ack
+        server_msg.msg = msg
+        self.publisher_server.publish(server_msg)
+
+    def send_new_server_message(self, msg_text, purpose):
+        """
+        Send a brand-new (non-ack) message to the server and remember it
+        so we can match the server's ack when it comes back.
+
+        purpose: "PATIENT_FOUND" or "HOSPITAL_FOUND" - tells
+        server_communication_callback what to do once this gets acked.
+        """
+        self.uid = self.generate_uid()
+        self.pending_outgoing = {"uid": self.uid, "purpose": purpose}
+
+        self._publish_server_message(dest=2, uid=self.uid, ack=0, msg=msg_text)
+
+        self.get_logger().info(
+            f"[SERVER] Sent uid={self.uid} msg='{msg_text}' purpose={purpose} - waiting for ack"
+        )
         
     def debug_status(self):
         self.get_logger().info(
-            f"Mode={self.lane_mode}"
+            f"Mode={self.lane_mode} | MissionPhase={self.mission_phase} | UID={self.uid}"
         )
 
-        self.get_logger().info(
-            f"Pending={self.pending_turn} | "
-            f"Sign={self.sign_detected} | "
-            f"TurnNow={self.turn_now}"
-        )
+        #self.get_logger().info(
+        #   f"Pending={self.pending_turn} | "
+        #   f"Sign={self.sign_detected} | "
+        #   f"TurnNow={self.turn_now}"
+        #)
 
     def set_target_patient(self, patient):
 
@@ -538,6 +710,90 @@ class LineFollower(Node):
                 # Clear PID history so old turn-time error doesn't leak
                 # into fresh lane-following control
                 self._reset_pid_state()
+
+    def handle_qr_state(self):
+        """
+        Vehicle behavior while a QR is being read or just finished.
+
+        READING: QR currently visible -> drive straight (turn=0) so the
+                 camera gets a clean, stable read while it's in frame.
+        WAITING: QR just left the frame -> stop the vehicle and process
+                 the decoded value exactly once, then resume the mission.
+        """
+        if self.qr_state == "READING":
+            self.target_turn = 0.0
+            # Speed left as-is (self.target_speed unchanged).
+            # Lower it here if you want a more careful/stable read.
+            return
+
+        if self.qr_state == "WAITING":
+            # Stop while we decide what to do with the QR result.
+            self.target_speed = 0.0
+            self.target_turn = 0.0
+
+            self.process_qr_result(self.last_qr_value)
+
+            # Done processing -> hand control back to normal search/driving.
+            self.qr_state = "IDLE"
+            return
+
+    def process_qr_result(self, qr_value):
+        """
+        Decide what to do once a QR code has been fully read (called from
+        handle_qr_state once qr_is_visible goes True -> False).
+
+        Case (a) - Patient QR (A, B, C, ...), only valid while
+                   mission_phase == "SEARCHING_PATIENT":
+            Report the patient id to the server and move into
+            PATIENT_QR_READ_WAIT_ACK. Do NOT resume driving until the
+            full handshake (ack -> hospital location -> our ack) completes.
+
+        Case (b) - Hospital QR (X, Y, Z, ...), only valid while
+                   mission_phase == "SEARCHING_HOSPITAL":
+            If it matches current_destination -> report to server and
+            move into HOSPITAL_QR_READ_WAIT_ACK.
+            If it does NOT match -> no state change, keep searching.
+        """
+        if qr_value is None:
+            return
+
+        self.get_logger().info(f"[QR] Processing QR result: {qr_value} (phase={self.mission_phase})")
+
+        # ---------------- Case (a): patient QR ----------------
+        if qr_value in self.patient_codes and self.mission_phase == "SEARCHING_PATIENT":
+            server_code = self.qr_to_server_patient[qr_value]   # "PATIENT_1" -> "A"
+            self.patient_id = server_code
+
+            self.send_new_server_message(server_code, purpose="PATIENT_FOUND")
+            self.mission_phase = "PATIENT_QR_READ_WAIT_ACK"
+        # ---------------- Case (b): hospital QR ----------------
+        elif qr_value in self.hospital_codes and self.mission_phase == "SEARCHING_HOSPITAL":
+            server_code = self.qr_to_server_hospital[qr_value]  # "HOSPITAL_1" -> "X"
+
+            if server_code == self.current_destination:   # current_destination stored as "X" from server
+                self.send_new_server_message(server_code, purpose="HOSPITAL_FOUND")
+                self.mission_phase = "HOSPITAL_QR_READ_WAIT_ACK"
+            else:
+                self.get_logger().info(f"[QR] '{qr_value}'({server_code}) != target '{self.current_destination}'")
+        
+        else:
+            self.get_logger().warn(
+                f"[QR] Unexpected QR '{qr_value}' while in phase {self.mission_phase}"
+            )
+
+    def get_hospital_for_patient(self, patient_id):
+        """
+        STUB: Replace with real logic for mapping a picked-up patient to
+        their destination hospital. If the hospital is directly encoded
+        in the QR string itself, you likely don't need this lookup at
+        all - parse it straight out of qr_value in process_qr_result().
+        """
+        mapping = {
+            "A": "X",
+            "B": "Y",
+            "C": "Z",
+        }
+        return mapping.get(patient_id, None)
 
 def main(args=None):
     rclpy.init(args=args)

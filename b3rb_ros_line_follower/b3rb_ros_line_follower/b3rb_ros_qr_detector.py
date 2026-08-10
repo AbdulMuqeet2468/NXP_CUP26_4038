@@ -48,6 +48,11 @@ class QRDetector(Node):
         self.required_hits = 3
         self.published_qr = None
 
+        # How many consecutive frames with NO QR detected before we
+        # declare "no QR visible" and publish that fact.
+        self.miss_count = 0
+        self.required_misses = 3
+
         self.get_logger().info("QR Detector Node started. Waiting for images...")
 
     def camera_image_callback(self, message):
@@ -59,13 +64,31 @@ class QRDetector(Node):
         if image is None:
             return
 
-        qr_data = self.detect_qr_code(image)
+        raw_qr = self.detect_qr_code(image)
 
-        if qr_data is None:
+        # ---------------- No QR found this frame ----------------
+        if raw_qr is None:
             self.last_qr = None
             self.stable_count = 0
-            self.published_qr = None
+            self.miss_count += 1
+
+            # Only declare "not visible" after several consecutive misses,
+            # so a single dropped/blurry frame doesn't cause a false
+            # disappearance. Publish exactly once on the transition.
+            if self.miss_count >= self.required_misses and self.published_qr is not None:
+                msg = String()
+                msg.data = ""
+                self.publisher_qr.publish(msg)
+                self.published_qr = None
+                self.get_logger().info("QR Data: None")
+
             return
+
+        # A QR was found this frame -> reset the miss streak.
+        self.miss_count = 0
+
+        # Clean up the raw payload, e.g. "{LOC: HOSPITAL_1}" -> "HOSPITAL_1"
+        qr_data = self.parse_qr_payload(raw_qr)
 
         if qr_data == self.last_qr:
             self.stable_count += 1
@@ -78,8 +101,27 @@ class QRDetector(Node):
             msg.data = qr_data
             self.publisher_qr.publish(msg)
             self.published_qr = qr_data
-            
+
         self.get_logger().info(f"QR Data: {qr_data}")
+
+    def parse_qr_payload(self, raw_data):
+        """
+        Cleans up the raw decoded QR string into just the value we care
+        about, e.g.:
+            "{LOC: HOSPITAL_1}"  -> "HOSPITAL_1"
+            "LOC: HOSPITAL_1"    -> "HOSPITAL_1"
+            "HOSPITAL_1"         -> "HOSPITAL_1"  (already clean, unaffected)
+
+        Adjust this if your QR payload format differs (e.g. multiple
+        fields, different delimiter).
+        """
+        text = raw_data.strip()
+        text = text.strip("{}").strip()
+
+        if ":" in text:
+            text = text.split(":", 1)[1]
+
+        return text.strip()
 
     def detect_qr_code(self, image):
         """
