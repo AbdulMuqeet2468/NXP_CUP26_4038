@@ -127,10 +127,14 @@ class LineFollower(Node):
         self.obj_on_left = False
         self.obj_still_on_right = False
         self.obj_still_on_left = False
+        self.building_on_right = False
+        self.building_on_left = False
 
         # LIDAR distance thresholds 
         self.min_threshold = 0.5
         self.detection_threshold = 1.5 #1.5
+        self.building_on_right_threshold = 3.0
+        self.building_on_left_threshold = 3.0
 
         # Lane
         self.lane_mode = "CENTER"  # Options: "CENTER", "STICK_LEFT", "STICK_RIGHT", "TURN_LEFT", "TURN_RIGHT"
@@ -144,6 +148,9 @@ class LineFollower(Node):
         # Turn timing variables
         self.turn_start_time = 0.0
         self.min_turn_time = 2.5     # seconds
+
+        self.hospital_detected = False
+        self.patient_detected = False
 
         # Sub-state for the new turn logic:
         # "STRAIGHT" -> drive straight until lane vanishes (vector_count == 0)
@@ -189,6 +196,8 @@ class LineFollower(Node):
         # HOSPITAL_QR_READ_WAIT_ACK  -> sent hospital-found to server, waiting for ack
         # WAITING_NEXT_PATIENT       -> acked; waiting for server to send next patient
         self.mission_phase = "SEARCHING_PATIENT"
+
+        self.watching_for_stop = False  # True after QR disappears, until LIDAR says "inside premises"
 
         # Buggy must stay parked (stopped) in all of these phases - it's
         # mid-handshake with the server and shouldn't keep driving.
@@ -276,9 +285,17 @@ class LineFollower(Node):
             self.execute_turn()
             return
 
+        # Continuously watch (every tick, not just once) for LIDAR signal
+        # that we're inside the premises, if we're past a QR read.
+        if self.watching_for_stop and (self.building_on_right or self.building_on_left):
+            self.get_logger().info("[QR] Inside premises (LIDAR). Stopping to process.")
+            self.qr_state = "WAITING"
+            self.watching_for_stop = False
+
         # While a QR is being read or just finished being read, override
         # normal lane-following entirely.
-        if self.qr_state in ("READING", "WAITING"):
+        #if self.qr_state in ("READING", "WAITING"):
+        if self.qr_state == "WAITING":
             self.handle_qr_state()
             return
 
@@ -395,16 +412,22 @@ class LineFollower(Node):
         front_right = message.ranges[120:165]
         left = message.ranges[240:300]
         right = message.ranges[60:119]
+        narrow_left = message.ranges[295:315]
+        narrow_right = message.ranges[55:65]
 
         front_right_vals = [x for x in front_right if np.isfinite(x)]
         front_left_vals = [x for x in front_left if np.isfinite(x)]
         right_vals = [x for x in right if np.isfinite(x)]
         left_vals = [x for x in left if np.isfinite(x)]
+        narrow_left_vals = [x for x in narrow_left if np.isfinite(x)]
+        narrow_right_vals = [x for x in narrow_right if np.isfinite(x)]
 
         front_right_min = min(front_right_vals) if front_right_vals else float('inf')
         front_left_min = min(front_left_vals) if front_left_vals else float('inf')
         right_avg = np.mean(right_vals) if right_vals else float("inf")
         left_avg = np.mean(left_vals) if left_vals else float("inf")
+        narrow_left_avg = np.mean(narrow_left_vals) if narrow_left_vals else float("inf")
+        narrow_right_avg = np.mean(narrow_right_vals) if narrow_right_vals else float("inf")
 
         # Estimate direction of objects
         if front_right_min < self.detection_threshold:
@@ -445,7 +468,18 @@ class LineFollower(Node):
 
         else:
             self.lane_mode = "CENTER"
-            
+
+        # flags for building detection
+        if narrow_right_avg < self.building_on_right_threshold:
+            self.building_on_right = True
+        else:
+            self.building_on_right = False
+        
+        if narrow_left_avg < self.building_on_left_threshold:
+            self.building_on_left = True    
+        else:
+            self.building_on_left = False
+
     def server_communication_callback(self, message):
         """
         Handles two kinds of incoming server messages:
@@ -555,17 +589,20 @@ class LineFollower(Node):
         if qr_now_visible:
             self.last_qr_value = data
 
+        # Transition: visible -> not visible => resume normal driving,
+        # but start watching LIDAR for "inside premises" signal.
+        if (not qr_now_visible) and self.qr_is_visible and self.qr_state == "READING":
+            self.get_logger().info("[QR] QR no longer visible. Resuming drive, watching LIDAR.")
+            self.qr_state = "IDLE"
+            self.watching_for_stop = True
+
         # Transition: not visible -> visible => start of a QR read
         if qr_now_visible and not self.qr_is_visible:
             self.get_logger().info(f"[QR] QR code detected: {data}")
             self.qr_state = "READING"
 
-        # Transition: visible -> not visible => QR finished, go wait/process
-        if (not qr_now_visible) and self.qr_is_visible and self.qr_state == "READING":
-            self.get_logger().info("[QR] QR no longer visible. Stopping to process.")
-            self.qr_state = "WAITING"
-
         self.qr_is_visible = qr_now_visible
+        
 
     def sign_board_callback(self, message):
 
@@ -620,7 +657,7 @@ class LineFollower(Node):
         
     def debug_status(self):
         self.get_logger().info(
-            f"Mode={self.lane_mode} | MissionPhase={self.mission_phase} | UID={self.uid}"
+            f"Mode={self.lane_mode} | MissionPhase={self.mission_phase} | UID={self.uid} | qrState={self.qr_state}"
         )
 
         #self.get_logger().info(
@@ -721,7 +758,7 @@ class LineFollower(Node):
                  the decoded value exactly once, then resume the mission.
         """
         if self.qr_state == "READING":
-            self.target_turn = 0.0
+            #self.target_turn = 0.0
             # Speed left as-is (self.target_speed unchanged).
             # Lower it here if you want a more careful/stable read.
             return
