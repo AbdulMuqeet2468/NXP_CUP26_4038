@@ -7,6 +7,9 @@ from std_msgs.msg import String
 from synapse_msgs.msg import EdgeVectors, ServerCommunication
 import numpy as np
 import random
+from sensor_msgs.msg import CompressedImage
+from cv_bridge import CvBridge
+import cv2
 
 QOS_PROFILE_DEFAULT = 10
 PI = math.pi
@@ -65,6 +68,13 @@ class LineFollower(Node):
             self.sign_board_callback,
             QOS_PROFILE_DEFAULT)
 
+        # 6. Camera Image (from camera node, for shadow detection)
+        self.subscription_camera = self.create_subscription(
+            CompressedImage,
+            '/camera/image_raw/compressed',
+            self.camera_shadow_image_callback,
+            QOS_PROFILE_DEFAULT)
+
         # ------------------ Publishers ------------------
         
         # Publisher to drive/steer the buggy
@@ -86,20 +96,17 @@ class LineFollower(Node):
                 10
             )
 
+        # Publisher to send shadow detection debug images (for debugging)
+        self.publisher_shadow_debug = self.create_publisher(
+            CompressedImage,
+            '/debug/shadow_image',
+            QOS_PROFILE_DEFAULT)
+
         # ------------------ State Variables & Timer ------------------
         
         # Default controls
         self.target_speed = 0.0
         self.target_turn = 0.0
-
-        # State variables (You can add your own state flags / state machines here)
-        self.obstacle_in_front = False
-        self.patient_id = None
-        self.hospital_id = None
-        self.current_destination = None
-        self.mission_completed = False
-
-        #added
         
         # earlier good values
         #self.kp = 0.0076
@@ -145,10 +152,7 @@ class LineFollower(Node):
         self.turn_now = False
         self.lane_lost_during_turn = False
 
-        # Turn timing variables
-        self.turn_start_time = 0.0
-        self.min_turn_time = 2.5     # seconds
-
+        # detection flags by reading QR codes
         self.hospital_detected = False
         self.patient_detected = False
 
@@ -222,6 +226,16 @@ class LineFollower(Node):
 
         self.uid = None  # last message uid we sent to the server
 
+        # --------- Shadow Detection State ---------
+        self.bridge = CvBridge()
+        self.shadow_detected = False
+
+        # shadow appears in-frame (near hospitals, ground level).
+        self.shadow_roi = (0.45, 0.75, 0.55, 0.95)  # (x1,y1,x2,y2) as fraction of image
+        self.shadow_dark_threshold = 120     # pixel value below this = "dark/shadow"
+        self.shadow_area_ratio = 0.95        # fraction of ROI that must be dark to trigger
+
+
         # Timer to publish drive commands at 10Hz
         self.control_timer = self.create_timer(0.1, self.publish_drive_commands)
 
@@ -266,11 +280,48 @@ class LineFollower(Node):
 
     # ------------------ Callback Implementations ------------------
 
+    def camera_shadow_image_callback(self, message):
+        """Detects a shadow patch in a cropped ROI - used to precisely
+        trigger the hospital stop, since LIDAR distance alone stops too early."""
+        
+        # works only when hospital is detected, otherwise ignore the shadow detection
+        if not self.hospital_detected:
+            self.shadow_detected = False
+            return
+
+        np_arr = np.frombuffer(message.data, np.uint8)
+        image = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+        if image is None:
+            return
+
+        h, w = image.shape[:2]
+        x1, y1, x2, y2 = self.shadow_roi
+        crop = image[int(y1*h):int(y2*h), int(x1*w):int(x2*w)]
+
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        # added this line
+        mask = gray < self.shadow_dark_threshold
+        dark_pixels = np.sum(mask)
+        total_pixels = gray.size
+
+        self.shadow_detected = (dark_pixels / total_pixels) >= self.shadow_area_ratio
+
+         # ---- Publish debug view: crop with dark-mask overlaid in red ----
+        debug_img = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+        debug_img[mask] = [0, 0, 255]  # red where "shadow" detected
+
+        ratio = dark_pixels / total_pixels
+        cv2.putText(debug_img, f"ratio={ratio:.2f} shadow={self.shadow_detected}",
+                    (5, 15), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
+
+        # publish the debug image to /debug/shadow_image for visualization
+        debug_msg = self.bridge.cv2_to_compressed_imgmsg(debug_img)
+        self.publisher_shadow_debug.publish(debug_msg)
+
     def edge_vectors_callback(self, message):
         """
         Receives lane boundaries from the camera vector extractor
         """
-        
         self.edge_vector_count = message.vector_count
 
         # While we're mid-handshake with the server (sent a message and
@@ -291,8 +342,16 @@ class LineFollower(Node):
         # that we're inside the premises, if we're past a QR read.
         if self.watching_for_stop and (self.building_on_right or self.building_on_left):
             self.get_logger().info("[QR] Inside premises (LIDAR). Stopping to process.")
-            self.qr_state = "WAITING"
-            self.watching_for_stop = False
+            
+            # For hospital, we also require the shadow detection to trigger the stop.
+            if self.hospital_detected and self.shadow_detected:
+                self.get_logger().info("[QR] Shadow detected. Stopping at hospital.")
+                self.qr_state = "WAITING"
+                self.watching_for_stop = False
+            elif self.patient_detected:
+                self.get_logger().info("[QR] Stopping at patient.")
+                self.qr_state = "WAITING"
+                self.watching_for_stop = False
 
         # While a QR is being read or just finished being read, override
         # normal lane-following entirely.
