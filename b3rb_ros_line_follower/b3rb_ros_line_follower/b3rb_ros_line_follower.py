@@ -166,6 +166,7 @@ class LineFollower(Node):
 
         # Have to change this
         self.targets = ["A", "X", "B", "Y", "C", "Z"]
+        self.target_patient = "A"   # current specific patient we must find
         self.current_target = 0
 
         self.set_target_patient(self.targets[self.current_target])
@@ -625,6 +626,7 @@ class LineFollower(Node):
                 self.hospital_id = None
                 self.current_destination = None
 
+                self.target_patient = patient #added
                 self.search_patient = True
                 self.search_hospital = False
                 self.mission_phase = "SEARCHING_PATIENT"
@@ -886,10 +888,15 @@ class LineFollower(Node):
         # ---------------- Case (a): patient QR ----------------
         if qr_value in self.patient_codes and self.mission_phase == "SEARCHING_PATIENT":
             server_code = self.qr_to_server_patient[qr_value]   # "PATIENT_1" -> "A"
-            self.patient_id = server_code
 
-            self.send_new_server_message(server_code, purpose="PATIENT_FOUND")
-            self.mission_phase = "PATIENT_QR_READ_WAIT_ACK"
+            if server_code == self.target_patient:
+                self.patient_id = server_code
+                self.send_new_server_message(server_code, purpose="PATIENT_FOUND")
+                self.mission_phase = "PATIENT_QR_READ_WAIT_ACK"
+            else:
+                self.get_logger().info(
+                    f"[QR] '{qr_value}'({server_code}) != target patient '{self.target_patient}'. Continuing search."
+                )
         # ---------------- Case (b): hospital QR ----------------
         elif qr_value in self.hospital_codes and self.mission_phase == "SEARCHING_HOSPITAL":
             server_code = self.qr_to_server_hospital[qr_value]  # "HOSPITAL_1" -> "X"
