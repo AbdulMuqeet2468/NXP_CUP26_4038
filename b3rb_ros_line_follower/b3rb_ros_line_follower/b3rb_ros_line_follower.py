@@ -285,6 +285,8 @@ class LineFollower(Node):
             self.execute_turn()
             return
 
+        
+
         # Continuously watch (every tick, not just once) for LIDAR signal
         # that we're inside the premises, if we're past a QR read.
         if self.watching_for_stop and (self.building_on_right or self.building_on_left):
@@ -299,6 +301,7 @@ class LineFollower(Node):
             self.handle_qr_state()
             return
 
+        #hospital qr detection logic was here
         # ---- NEW: hospital QR override ----
         # From the moment a hospital QR is seen until we're stopped
         # (qr_state -> WAITING, handled above), ignore edge vectors
