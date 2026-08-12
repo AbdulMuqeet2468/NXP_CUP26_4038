@@ -299,6 +299,15 @@ class LineFollower(Node):
             self.handle_qr_state()
             return
 
+        # ---- NEW: hospital QR override ----
+        # From the moment a hospital QR is seen until we're stopped
+        # (qr_state -> WAITING, handled above), ignore edge vectors
+        # entirely and just drive straight at a fixed speed.
+        if self.hospital_detected:
+            self.target_turn = 0.0
+            self.target_speed = 0.685
+            return
+
         width = message.image_width
         image_center = width / 2.0
 
@@ -601,9 +610,22 @@ class LineFollower(Node):
             self.get_logger().info(f"[QR] QR code detected: {data}")
             self.qr_state = "READING"
 
+            # Determine QR type right away so edge_vectors_callback knows
+            # how to drive for the rest of this read (patient = normal
+            # lane following, hospital = forced straight-line override).
+            if data in self.patient_codes:
+                self.patient_detected = True
+                self.hospital_detected = False
+            elif data in self.hospital_codes:
+                self.hospital_detected = True
+                self.patient_detected = False
+            else:
+                self.patient_detected = False
+                self.hospital_detected = False
+                self.get_logger().warn(f"[QR] Unrecognized QR type: {data}")
+
         self.qr_is_visible = qr_now_visible
         
-
     def sign_board_callback(self, message):
 
 
@@ -772,6 +794,9 @@ class LineFollower(Node):
 
             # Done processing -> hand control back to normal search/driving.
             self.qr_state = "IDLE"
+            #reset falgs so that we can detect the next QR code
+            self.patient_detected = False
+            self.hospital_detected = False
             return
 
     def process_qr_result(self, qr_value):
