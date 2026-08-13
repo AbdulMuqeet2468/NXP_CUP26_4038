@@ -152,6 +152,11 @@ class LineFollower(Node):
         self.turn_now = False
         self.lane_lost_during_turn = False
 
+        self.patient_id = None
+        self.hospital_id = None
+        self.current_destination = None  
+        self.mission_completed = False
+
         # detection flags by reading QR codes
         self.hospital_detected = False
         self.patient_detected = False
@@ -690,8 +695,18 @@ class LineFollower(Node):
                 self.patient_detected = True
                 self.hospital_detected = False
             elif data in self.hospital_codes:
-                self.hospital_detected = True
-                self.patient_detected = False
+                # Only trigger straight-drive override if this is
+                # actually our target hospital - not a fake/wrong one.
+                server_code = self.qr_to_server_hospital[data]
+                if server_code == self.current_destination:
+                    self.hospital_detected = True
+                    self.patient_detected = False
+                else:
+                    self.get_logger().info(
+                        f"[QR] Wrong hospital '{data}' - ignoring, continue normal driving."
+                    )
+                    self.hospital_detected = False
+                    self.patient_detected = False
             else:
                 self.patient_detected = False
                 self.hospital_detected = False
