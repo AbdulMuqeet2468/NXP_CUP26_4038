@@ -16,7 +16,7 @@ PI = math.pi
 
 # Control bounds
 SPEED_MIN = 0.0
-SPEED_MAX = 1.0
+SPEED_MAX = 2.0
 TURN_MIN = -1.0
 TURN_MAX = 1.0
 
@@ -189,6 +189,10 @@ class LineFollower(Node):
         self.search_patient = True     # informational flag, mirrors mission_phase
         self.search_hospital = False   # informational flag, mirrors mission_phase
 
+        # ---- Adaptive speed state ----
+        # Timestamp of last LIDAR front-obstacle detection
+        self.last_obstacle_detected_time = time.time()
+
         # Detector format -> server format ("A", "X", etc. per protocol)
         self.qr_to_server_patient = {"PATIENT_1": "A", "PATIENT_2": "B", "PATIENT_3": "C"}
         self.qr_to_server_hospital = {"HOSPITAL_1": "X", "HOSPITAL_2": "Y", "HOSPITAL_3": "Z"}
@@ -249,6 +253,23 @@ class LineFollower(Node):
         self.create_timer(1.0, self.debug_status)
 
         self.get_logger().info("Line Follower controller initialized. Starting Mission.")
+
+    def compute_adaptive_speed(self):
+        """
+        Ramp speed based on time since last LIDAR obstacle.
+        - Just cleared obstacle (< 0.5s): 0.5
+        - Clearing (0.5s - 2.0s): 1.0
+        - Clear for 2+ seconds: ramp 1.0 -> 2.0 over 3 more seconds
+        """
+        time_clear = time.time() - self.last_obstacle_detected_time
+        if time_clear < 0.5:
+            return 0.5                        # just passed an obstacle
+        elif time_clear < 2.0:
+            return 1.0                        # recently saw obstacle
+        else:
+            # Ramp: 1.0 -> 2.0 over 3 more seconds (2s to 5s of clear)
+            extra = min((time_clear - 2.0) / 3.0, 1.0)  # 0.0 -> 1.0
+            return 1.0 + extra * 1.0                      # 1.0 -> 2.0
 
     def publish_drive_commands(self):
         """Timer callback that periodically publishes the current speed and steer command."""
@@ -401,12 +422,9 @@ class LineFollower(Node):
             # ------------------ Two lanes ------------------
             if two_lanes:
 
-                self.target_speed = 1.0
+                # Adaptive speed based on time since last LIDAR obstacle
+                self.target_speed = self.compute_adaptive_speed()
 
-                # PID control for two lane control
-                #self.kp = 0.00775
-                #self.kd = 0.00425
-                #self.ki = 0.000014
 
                 # PID control for lane following    
                 error = lane_center - image_center
@@ -414,7 +432,8 @@ class LineFollower(Node):
                 return
        
             # ------------------ One lane ------------------
-            self.target_speed = 0.45
+            # Cap speed at 0.8 even if road is clear (less confident with one lane)
+            self.target_speed = min(self.compute_adaptive_speed(), 0.8)
 
             #trying values for single lane control
             #self.kp = 0.00775
@@ -516,6 +535,10 @@ class LineFollower(Node):
             self.obj_on_left = True
         else:
             self.obj_on_left = False
+
+        # ---- Adaptive speed: update obstacle timestamp ----
+        if self.obj_on_right or self.obj_on_left:
+            self.last_obstacle_detected_time = time.time()
 
         # Check if objects are still present in the same direction
         #Check right side
