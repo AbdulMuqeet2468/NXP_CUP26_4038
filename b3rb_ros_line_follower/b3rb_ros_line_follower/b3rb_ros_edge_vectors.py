@@ -141,13 +141,16 @@ class EdgeVectorsPublisher(Node):
         self.lower_image_height = int(self.image_height * VECTOR_IMAGE_HEIGHT_PERCENTAGE)
         self.upper_image_height = int(self.image_height - self.lower_image_height)
 
-        # 1. Convert to Grayscale
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        # 1. Convert to HSV
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
 
-        # 2. Binary Thresholding (aiming to isolate the black stripes of the track)
-        # Note: In the simulation, black stripes will result in low intensity values (close to 0).
-        threshold_black = 10
-        thresh = cv2.threshold(gray, threshold_black, 255, cv2.THRESH_BINARY_INV)[1]
+        # 2. Isolate true black: low Value (dark) regardless of Hue,
+        # and typically low-to-moderate Saturation (colored obstacles
+        # will have higher saturation even if dark).
+        lower_black = np.array([0, 0, 0])
+        upper_black = np.array([180, 80, 50])   # tune S and V max
+
+        thresh = cv2.inRange(hsv, lower_black, upper_black)
 
         # 3. Crop the image to focus on the lower section close to the buggy
         #thresh_cropped = thresh[self.image_height - self.lower_image_height:]
