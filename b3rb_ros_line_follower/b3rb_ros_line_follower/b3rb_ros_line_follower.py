@@ -333,9 +333,7 @@ class LineFollower(Node):
         # While we're mid-handshake with the server (sent a message and
         # waiting for ack, or waiting for the server's next instruction),
         # stay completely parked. Don't drive, don't turn.
-
-        # Also if mission is complete
-        if self.mission_phase in self.waiting_phases or self.mission_phase == "MISSION_COMPLETE":
+        if self.mission_phase in self.waiting_phases:
             self.target_speed = 0.0
             self.target_turn = 0.0
             return
@@ -629,28 +627,21 @@ class LineFollower(Node):
 
             elif self.mission_phase == "WAITING_NEXT_PATIENT":
                 patient = message.msg
+                self.patient_id = None
+                self.hospital_id = None
+                self.current_destination = None
 
-                # Mission Complete
-                if patient == "OK":
-                    # No more patients - mission complete.
-                    self.get_logger().info("[SERVER] Mission complete signal received.")
-                    self.mission_completed = True
-                    self.mission_phase = "MISSION_COMPLETE"
-                else:
-                    self.patient_id = None
-                    self.hospital_id = None
-                    self.current_destination = None
+                self.target_patient = patient #added
+                self.search_patient = True
+                self.search_hospital = False
+                self.mission_phase = "SEARCHING_PATIENT"
 
-                    self.target_patient = patient
-                    self.search_patient = True
-                    self.search_hospital = False
-                    self.mission_phase = "SEARCHING_PATIENT"
+                # Tell the object_recognizer node about the new target patient
+                self.set_target_patient(patient)
 
-                    self.set_target_patient(patient)
-
-                    self.get_logger().info(
-                        f"[SERVER] Next target patient: '{patient}'. Resuming mission."
-                    )
+                self.get_logger().info(
+                    f"[SERVER] Next target patient: '{patient}'. Resuming mission."
+                )
 
             else:
                 self.get_logger().warn(
