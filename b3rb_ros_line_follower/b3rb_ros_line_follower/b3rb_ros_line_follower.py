@@ -138,7 +138,7 @@ class LineFollower(Node):
         self.building_on_left = False
 
         # LIDAR distance thresholds 
-        self.min_threshold = 0.35
+        self.min_threshold = 0.45
         self.detection_threshold = 1.5 #1.5
         self.building_on_right_threshold = 3.0
         self.building_on_left_threshold = 3.0
@@ -409,7 +409,7 @@ class LineFollower(Node):
                 return
        
             # ------------------ One lane ------------------
-            self.target_speed = 0.685
+            self.target_speed = 0.45
 
             #trying values for single lane control
             #self.kp = 0.00775
@@ -480,8 +480,8 @@ class LineFollower(Node):
             return
         
         # LIDAR sectors
-        front_left = message.ranges[181:200]
-        front_right = message.ranges[160:179]
+        front_left = message.ranges[190:200]
+        front_right = message.ranges[160:170]
         left = message.ranges[250:280]
         right = message.ranges[80:110]
         narrow_left = message.ranges[295:315]
@@ -526,12 +526,12 @@ class LineFollower(Node):
             self.obj_still_on_left = False
 
         # Based on side checks, decide lane mode
-        if self.obj_on_right and self.obj_on_left:
+        #if self.obj_on_right and self.obj_on_left:
             # Obstacle on both sides - likely just narrow track/walls,
             # not a real single obstacle to dodge - go straight down the middle.
-            self.lane_mode = "CENTER"
+        #    self.lane_mode = "CENTER"
 
-        elif self.obj_on_right:
+        if self.obj_on_right:
             self.lane_mode = "STICK_LEFT"
 
         elif self.obj_on_left:
