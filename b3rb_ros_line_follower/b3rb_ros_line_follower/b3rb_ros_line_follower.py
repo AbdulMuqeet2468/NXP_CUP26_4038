@@ -138,8 +138,8 @@ class LineFollower(Node):
         self.building_on_left = False
 
         # LIDAR distance thresholds 
-        self.min_threshold = 0.5
-        self.detection_threshold = 1.5 #1.5
+        self.min_threshold = 0.35
+        self.detection_threshold = 1.2 #1.5
         self.building_on_right_threshold = 3.0
         self.building_on_left_threshold = 3.0
 
@@ -506,6 +506,11 @@ class LineFollower(Node):
         narrow_left_avg = np.mean(narrow_left_vals) if narrow_left_vals else float("inf")
         narrow_right_avg = np.mean(narrow_right_vals) if narrow_right_vals else float("inf")
 
+        self.get_logger().info(
+            f"Front Right Min: {front_right_min}, Front Left Min: {front_left_min}, "
+            f"Right Avg: {right_avg}, Left Avg: {left_avg}"
+        )
+
         # Estimate direction of objects
         if front_right_min < self.detection_threshold:
             self.obj_on_right = True
@@ -530,12 +535,20 @@ class LineFollower(Node):
         else:
             self.obj_still_on_left = False
 
-        # Based on side checks, check if object is still present in the same direction
-        if self.obj_on_right:
+        # Based on side checks, decide lane mode
+        if self.obj_on_right and self.obj_on_left:
+            # Obstacle on both sides - likely just narrow track/walls,
+            # not a real single obstacle to dodge - go straight down the middle.
+            self.lane_mode = "CENTER"
+
+        elif self.obj_on_right:
             self.lane_mode = "STICK_LEFT"
 
         elif self.obj_on_left:
             self.lane_mode = "STICK_RIGHT"
+
+        elif self.obj_still_on_right and self.obj_still_on_left:
+            self.lane_mode = "CENTER"
 
         elif self.obj_still_on_right:
             self.lane_mode = "STICK_LEFT"
@@ -758,7 +771,9 @@ class LineFollower(Node):
         
     def debug_status(self):
         self.get_logger().info(
-            f"Mode={self.lane_mode} | MissionPhase={self.mission_phase} | UID={self.uid} | qrState={self.qr_state}"
+            #f"Mode={self.lane_mode} | MissionPhase={self.mission_phase} | UID={self.uid} | qrState={self.qr_state}"
+            f"Mode={self.lane_mode}"
+
         )
 
         #self.get_logger().info(
