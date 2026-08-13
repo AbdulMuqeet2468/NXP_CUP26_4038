@@ -115,12 +115,12 @@ class LineFollower(Node):
 
         # Tuned PID values for 'good' performance
         # currently used for both single and double lane detection
-        self.kp = 0.00775
-        self.kd = 0.00425
-        self.ki = 0.000014
+        self.kp = 0.00735
+        self.kd = 0.00000001
+        self.ki = 0.00004
 
         # Separate integral/prev_error state per control regime, so switching
-        # between CENTER (one/two lane), STICK_LEFT, and STICK_RIGHT doesn't
+        # betwee n CENTER (one/two lane), STICK_LEFT, and STICK_RIGHT doesn't
         # carry over error history from a different regime.
         self.pid_state = {
             "CENTER_TWO_LANE": {"integral": 0.0, "prev_error": 0.0},
