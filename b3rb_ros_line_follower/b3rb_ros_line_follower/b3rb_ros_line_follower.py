@@ -138,7 +138,7 @@ class LineFollower(Node):
         self.building_on_left = False
 
         # LIDAR distance thresholds 
-        self.min_threshold = 0.45
+        self.min_threshold = 0.5
         self.detection_threshold = 1.5 #1.5
         self.building_on_right_threshold = 3.0
         self.building_on_left_threshold = 3.0
