@@ -117,7 +117,7 @@ class LineFollower(Node):
         # currently used for both single and double lane detection
         self.kp = 0.00685
         self.kd = 0.000000004
-        self.ki = 0.00004
+        self.ki = 0.00003
 
         # Separate integral/prev_error state per control regime, so switching
         # between CENTER (one/two lane), STICK_LEFT, and STICK_RIGHT doesn't
@@ -139,7 +139,7 @@ class LineFollower(Node):
 
         # LIDAR distance thresholds 
         self.min_threshold = 0.35
-        self.detection_threshold = 1.2 #1.5
+        self.detection_threshold = 1.5 #1.5
         self.building_on_right_threshold = 3.0
         self.building_on_left_threshold = 3.0
 
@@ -480,10 +480,10 @@ class LineFollower(Node):
             return
         
         # LIDAR sectors
-        front_left = message.ranges[195:239]
-        front_right = message.ranges[120:165]
-        left = message.ranges[240:300]
-        right = message.ranges[60:119]
+        front_left = message.ranges[181:200]
+        front_right = message.ranges[160:179]
+        left = message.ranges[250:280]
+        right = message.ranges[80:110]
         narrow_left = message.ranges[295:315]
         narrow_right = message.ranges[55:65]
 
@@ -500,11 +500,6 @@ class LineFollower(Node):
         left_avg = np.mean(left_vals) if left_vals else float("inf")
         narrow_left_avg = np.mean(narrow_left_vals) if narrow_left_vals else float("inf")
         narrow_right_avg = np.mean(narrow_right_vals) if narrow_right_vals else float("inf")
-
-        self.get_logger().info(
-            f"Front Right Min: {front_right_min}, Front Left Min: {front_left_min}, "
-            f"Right Avg: {right_avg}, Left Avg: {left_avg}"
-        )
 
         # Estimate direction of objects
         if front_right_min < self.detection_threshold:
@@ -564,6 +559,11 @@ class LineFollower(Node):
             self.building_on_left = True    
         else:
             self.building_on_left = False
+
+        #self.get_logger().info(
+        #    f"FL={self.obj_on_left} | FR={self.obj_on_right}"
+        #    f"L={self.obj_still_on_left} | R={self.obj_still_on_right}"
+        #)
 
     def server_communication_callback(self, message):
         """
