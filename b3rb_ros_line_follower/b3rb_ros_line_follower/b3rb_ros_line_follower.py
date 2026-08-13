@@ -115,12 +115,12 @@ class LineFollower(Node):
 
         # Tuned PID values for 'good' performance
         # currently used for both single and double lane detection
-        self.kp = 0.00735
-        self.kd = 0.00000001
+        self.kp = 0.00685
+        self.kd = 0.000000004
         self.ki = 0.00004
 
         # Separate integral/prev_error state per control regime, so switching
-        # betwee n CENTER (one/two lane), STICK_LEFT, and STICK_RIGHT doesn't
+        # between CENTER (one/two lane), STICK_LEFT, and STICK_RIGHT doesn't
         # carry over error history from a different regime.
         self.pid_state = {
             "CENTER_TWO_LANE": {"integral": 0.0, "prev_error": 0.0},
@@ -151,11 +151,6 @@ class LineFollower(Node):
         self.pending_turn = None
         self.turn_now = False
         self.lane_lost_during_turn = False
-
-        self.patient_id = None
-        self.hospital_id = None
-        self.current_destination = None  
-        self.mission_completed = False
 
         # detection flags by reading QR codes
         self.hospital_detected = False
@@ -438,7 +433,7 @@ class LineFollower(Node):
 
             if self.turn_now:
                 return
-            self.target_speed = 0.5
+            self.target_speed = 0.45
 
             x = message.vector_1[1].x
 
@@ -706,18 +701,8 @@ class LineFollower(Node):
                 self.patient_detected = True
                 self.hospital_detected = False
             elif data in self.hospital_codes:
-                # Only trigger straight-drive override if this is
-                # actually our target hospital - not a fake/wrong one.
-                server_code = self.qr_to_server_hospital[data]
-                if server_code == self.current_destination:
-                    self.hospital_detected = True
-                    self.patient_detected = False
-                else:
-                    self.get_logger().info(
-                        f"[QR] Wrong hospital '{data}' - ignoring, continue normal driving."
-                    )
-                    self.hospital_detected = False
-                    self.patient_detected = False
+                self.hospital_detected = True
+                self.patient_detected = False
             else:
                 self.patient_detected = False
                 self.hospital_detected = False
